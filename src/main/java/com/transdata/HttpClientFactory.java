@@ -10,12 +10,12 @@ import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactory;
 import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactoryBuilder;
 import org.apache.hc.core5.http.io.SocketConfig;
 import org.apache.hc.core5.ssl.SSLContextBuilder;
-import org.apache.hc.core5.ssl.TrustAllStrategy;
 import org.apache.hc.core5.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLContext;
+import java.security.cert.X509Certificate;
 
 public class HttpClientFactory {
     private static final Logger LOGGER = LoggerFactory.getLogger(HttpClientFactory.class);
@@ -35,7 +35,7 @@ public class HttpClientFactory {
         if (insecure) {
             try {
                 SSLContext sslContext = SSLContextBuilder.create()
-                        .loadTrustMaterial(TrustAllStrategy.INSTANCE)
+                        .loadTrustMaterial((X509Certificate[] chain, String authType) -> true)
                         .build();
                 SSLConnectionSocketFactory sslSocketFactory = SSLConnectionSocketFactoryBuilder.create()
                         .setSslContext(sslContext)
