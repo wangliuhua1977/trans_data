@@ -18,7 +18,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map.Entry;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -186,7 +189,10 @@ public class AsyncSqlClient {
         resultResponse.setSqlState(textOrEmpty(response, "sqlState"));
         resultResponse.setTraceId(textOrEmpty(response, "traceId", "traceID"));
         resultResponse.setStackTrace(textOrEmpty(response, "stackTrace", "stacktrace"));
-        resultResponse.setColumnsCount(columnsCount(response));
+        List<String> columns = extractColumns(response);
+        resultResponse.setColumns(columns);
+        resultResponse.setColumnsCount(columns == null ? columnsCount(response) : columns.size());
+        resultResponse.setRows(extractRows(response, columns));
         resultResponse.setRawJson(responsePayload.rawJson());
         if (uiLog != null) {
             String truncated = JsonUtil.safeTruncate(responsePayload.rawJson(), config.getLoggingSqlMaxChars());
@@ -362,6 +368,106 @@ public class AsyncSqlClient {
             return columns.size();
         }
         return null;
+    }
+
+    private static List<String> extractColumns(JsonNode node) {
+        JsonNode columnsNode = locateArrayNode(node,
+                node.path("columns"),
+                node.path("data").path("columns"),
+                node.path("result").path("columns"),
+                node.path("data").path("result").path("columns"));
+        if (columnsNode == null) {
+            return null;
+        }
+        List<String> columns = new ArrayList<>();
+        for (JsonNode column : columnsNode) {
+            if (column.isTextual()) {
+                columns.add(column.asText());
+            } else if (column.isObject()) {
+                JsonNode name = column.path("name");
+                if (name.isTextual()) {
+                    columns.add(name.asText());
+                }
+            }
+        }
+        return columns.isEmpty() ? null : columns;
+    }
+
+    private static List<List<String>> extractRows(JsonNode node, List<String> columns) {
+        JsonNode rowsNode = locateArrayNode(node,
+                node,
+                node.path("resultRows"),
+                node.path("rows"),
+                node.path("data").path("rows"),
+                node.path("data").path("data"),
+                node.path("data").path("resultRows"),
+                node.path("result").path("rows"),
+                node.path("data").path("result").path("rows"),
+                node.path("data").path("result").path("data"));
+        if (rowsNode == null) {
+            return null;
+        }
+        List<List<String>> rows = new ArrayList<>();
+        for (JsonNode rowNode : rowsNode) {
+            rows.add(extractRowValues(rowNode, columns));
+        }
+        return rows;
+    }
+
+    private static JsonNode locateArrayNode(JsonNode root, JsonNode... nodes) {
+        if (root != null && root.isArray()) {
+            return root;
+        }
+        if (nodes == null) {
+            return null;
+        }
+        for (JsonNode node : nodes) {
+            if (node != null && node.isArray()) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    private static List<String> extractRowValues(JsonNode rowNode, List<String> columns) {
+        List<String> values = new ArrayList<>();
+        if (rowNode == null || rowNode.isNull()) {
+            return values;
+        }
+        if (rowNode.isArray()) {
+            for (JsonNode cell : rowNode) {
+                values.add(cellToString(cell));
+            }
+            return values;
+        }
+        if (rowNode.isObject()) {
+            if (columns != null && !columns.isEmpty()) {
+                for (String column : columns) {
+                    values.add(cellToString(rowNode.get(column)));
+                }
+                return values;
+            }
+            for (Entry<String, JsonNode> entry : iterable(rowNode.fields())) {
+                values.add(cellToString(entry.getValue()));
+            }
+        } else {
+            values.add(cellToString(rowNode));
+        }
+        return values;
+    }
+
+    private static String cellToString(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isValueNode()) {
+            return node.asText();
+        }
+        return node.toString();
+    }
+
+    private static <T> Iterable<T> iterable(java.util.Iterator<T> iterator) {
+        return () -> iterator;
     }
 
     private record ResponsePayload(String rawJson, JsonNode json) {
@@ -602,6 +708,8 @@ public class AsyncSqlClient {
         private String traceId;
         private String stackTrace;
         private Integer columnsCount;
+        private List<String> columns;
+        private List<List<String>> rows;
         private String rawJson;
 
         public String getJobId() {
@@ -674,6 +782,22 @@ public class AsyncSqlClient {
 
         public void setColumnsCount(Integer columnsCount) {
             this.columnsCount = columnsCount;
+        }
+
+        public List<String> getColumns() {
+            return columns;
+        }
+
+        public void setColumns(List<String> columns) {
+            this.columns = columns;
+        }
+
+        public List<List<String>> getRows() {
+            return rows;
+        }
+
+        public void setRows(List<List<String>> rows) {
+            this.rows = rows;
         }
 
         public String getRawJson() {
