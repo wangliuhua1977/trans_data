@@ -6,4 +6,6 @@ public interface ProgressListener {
     void updateProgress(int percent, String detail);
 
     void updateStats(TransferStats stats);
+
+    void updatePolling(String status, long elapsedMillis, Integer progressPercent);
 }

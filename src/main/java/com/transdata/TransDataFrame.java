@@ -50,6 +50,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel stageLabel = new JLabel("Idle");
     private final JLabel statsLabel = new JLabel("Ready");
+    private final JLabel pollingLabel = new JLabel("Polling: -");
     private final JTextArea logArea = new JTextArea();
 
     private SchedulerService schedulerService;
@@ -129,6 +130,9 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
 
         pgbc.gridy = 2;
         progressPanel.add(statsLabel, pgbc);
+
+        pgbc.gridy = 3;
+        progressPanel.add(pollingLabel, pgbc);
 
         logArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(logArea);
@@ -278,6 +282,16 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
                 label += ", jobId=" + stats.getJobId();
             }
             statsLabel.setText(label);
+        });
+    }
+
+    @Override
+    public void updatePolling(String status, long elapsedMillis, Integer progressPercent) {
+        SwingUtilities.invokeLater(() -> {
+            String progress = progressPercent == null || progressPercent < 0 ? "-" : progressPercent + "%";
+            String label = "Polling: status=" + status + ", elapsed=" + String.format("%.1fs", elapsedMillis / 1000.0)
+                    + ", progress=" + progress;
+            pollingLabel.setText(label);
         });
     }
 }

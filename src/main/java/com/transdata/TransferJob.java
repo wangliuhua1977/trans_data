@@ -3,8 +3,15 @@ package com.transdata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,7 +67,7 @@ public class TransferJob implements Runnable {
             }
             if (cancelled.get()) {
                 uiLog.log("WARN", "Job cancelled after fetch.");
-                updateStage("Failed");
+                updateStage("Cancelled");
                 return;
             }
 
@@ -74,7 +81,7 @@ public class TransferJob implements Runnable {
             for (Map.Entry<GroupKey, List<SourceRecord>> entry : grouped.entrySet()) {
                 if (cancelled.get()) {
                     uiLog.log("WARN", "Job cancelled before processing group.");
-                    updateStage("Failed");
+                    updateStage("Cancelled");
                     return;
                 }
                 groupIndex++;
@@ -89,12 +96,13 @@ public class TransferJob implements Runnable {
 
                 updateStage("Writing");
                 String sql = buildSqlForGroup(key, groupRecords, stats);
+                logPlainSql(sql, requestId, key, groupRecords.size(), stats.getTotalBatches(), config.getBatchSize());
 
                 updateStage("Encrypting");
                 String encryptedSql = encryptSql(sql);
 
                 updateStage("Submitting");
-                AsyncSqlClient.SubmitResponse submitResponse = asyncSqlClient.submit(config, encryptedSql);
+                AsyncSqlClient.SubmitResponse submitResponse = asyncSqlClient.submit(config, encryptedSql, uiLog, requestId);
                 String jobId = submitResponse.getJobId();
                 stats.setJobId(jobId);
                 progressListener.updateStats(stats);
@@ -102,27 +110,53 @@ public class TransferJob implements Runnable {
                         + ", requestId=" + requestId);
 
                 updateStage("Polling");
-                AsyncSqlClient.StatusResponse status = asyncSqlClient.pollStatus(config, jobId, uiLog, cancelled);
-                if (cancelled.get()) {
-                    uiLog.log("WARN", "Job cancelled during polling. jobId=" + jobId);
+                AsyncSqlClient.StatusResponse status = asyncSqlClient.pollStatus(
+                        config, jobId, uiLog, progressListener, cancelled, requestId);
+                if ("CANCELLED_LOCAL".equalsIgnoreCase(status.getStatus())) {
+                    uiLog.log("WARN", "Job cancelled during polling. jobId=" + jobId + ", requestId=" + requestId
+                            + ", reason=" + status.getErrorMessage());
+                    updateStage("Cancelled");
+                    return;
+                }
+                if ("TIMEOUT".equalsIgnoreCase(status.getStatus())) {
+                    uiLog.log("ERROR", "Polling timeout. jobId=" + jobId
+                            + ", errorMessage=" + status.getErrorMessage()
+                            + ", requestId=" + requestId);
                     updateStage("Failed");
                     return;
                 }
                 if (!"SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
                     uiLog.log("ERROR", "Job failed. jobId=" + jobId
                             + ", status=" + status.getStatus()
-                            + ", errorMessage=" + status.getErrorMessage()
-                            + ", errorPosition=" + status.getErrorPosition()
+                            + ", errorMessage=" + safeString(status.getErrorMessage())
+                            + ", errorPosition=" + safeString(status.getErrorPosition())
+                            + ", sqlState=" + safeString(status.getSqlState())
+                            + ", traceId=" + safeString(status.getTraceId())
                             + ", requestId=" + requestId);
                     updateStage("Failed");
                     return;
                 }
 
-                AsyncSqlClient.ResultResponse result = asyncSqlClient.result(config, jobId);
-                uiLog.log("INFO", "Job succeeded. jobId=" + jobId
-                        + ", rowsAffected=" + result.getRowsAffected()
-                        + ", actualRows=" + result.getActualRows()
-                        + ", requestId=" + requestId);
+                boolean hasRowsSummary = status.getRowsAffected() != null
+                        || status.getUpdatedRows() != null
+                        || status.getAffectedRows() != null
+                        || status.getActualRows() != null;
+                if (!hasRowsSummary) {
+                    AsyncSqlClient.ResultResponse result = asyncSqlClient.result(config, jobId, uiLog, requestId);
+                    uiLog.log("INFO", "Job succeeded. jobId=" + jobId
+                            + ", rowsAffected=" + result.getRowsAffected()
+                            + ", actualRows=" + result.getActualRows()
+                            + ", columns=" + result.getColumnsCount()
+                            + ", requestId=" + requestId);
+                } else {
+                    uiLog.log("INFO", "Job succeeded. jobId=" + jobId
+                            + ", rowsAffected=" + status.getRowsAffected()
+                            + ", updatedRows=" + status.getUpdatedRows()
+                            + ", affectedRows=" + status.getAffectedRows()
+                            + ", actualRows=" + status.getActualRows()
+                            + ", elapsed=" + status.getElapsedMillis()
+                            + ", requestId=" + requestId);
+                }
 
                 updateProgress(groupIndex, grouped.size());
             }
@@ -186,6 +220,61 @@ public class TransferJob implements Runnable {
         return CryptoUtil.encrypt(sql, keyBytes, ivBytes);
     }
 
+    private void logPlainSql(String sql,
+                             String requestId,
+                             GroupKey key,
+                             int records,
+                             int totalBatches,
+                             int batchSize) {
+        String targetTable = sqlBuilder.getTargetTable();
+        uiLog.log("INFO", "Prepared SQL for submit. requestId=" + requestId
+                + ", groupKey=" + key
+                + ", records=" + records
+                + ", batchSize=" + batchSize
+                + ", batches=" + totalBatches
+                + ", dbUser=" + config.getAsyncDbUser()
+                + ", targetTable=" + targetTable);
+        int maxChars = config.getLoggingSqlMaxChars();
+        if (sql.length() > maxChars) {
+            int snippet = Math.min(8000, Math.max(1, maxChars / 2));
+            String head = sql.substring(0, Math.min(snippet, sql.length()));
+            String tail = sql.substring(Math.max(0, sql.length() - snippet));
+            Path filePath = buildSqlDumpPath(requestId, "pending", key);
+            uiLog.log("INFO", "SQL preview (truncated). Full SQL will be saved to " + filePath
+                    + ". Preview=" + head + "...(truncated " + (sql.length() - (head.length() + tail.length()))
+                    + " chars)..." + tail);
+            writeSqlDump(filePath, sql);
+        } else {
+            uiLog.log("INFO", "SQL prepared: " + sql);
+        }
+    }
+
+    private Path buildSqlDumpPath(String requestId, String jobId, GroupKey key) {
+        String date = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
+        String dumpDir = config.getLoggingSqlDumpDir();
+        String safeGroup = sanitizeFilePart(key.getDateNo() + "_" + key.getDatetime());
+        String safeRequest = sanitizeFilePart(requestId);
+        String safeJob = sanitizeFilePart(jobId);
+        return Paths.get(dumpDir, date, "sql_" + safeRequest + "_" + safeJob + "_" + safeGroup + ".sql");
+    }
+
+    private void writeSqlDump(Path path, String sql) {
+        try {
+            Files.createDirectories(path.getParent());
+            Files.writeString(path, sql, StandardCharsets.UTF_8);
+        } catch (IOException ex) {
+            uiLog.log("WARN", "Failed to dump SQL to " + path + ": " + ex.getMessage());
+            LOGGER.warn("Failed to dump SQL to {}", path, ex);
+        }
+    }
+
+    private String sanitizeFilePart(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.replaceAll("[^a-zA-Z0-9._-]", "_");
+    }
+
     private void updateStage(String stage) {
         progressListener.updateStage(stage);
     }
@@ -193,5 +282,9 @@ public class TransferJob implements Runnable {
     private void updateProgress(int currentGroup, int totalGroups) {
         int percent = totalGroups == 0 ? 100 : (int) Math.round((currentGroup * 100.0) / totalGroups);
         progressListener.updateProgress(percent, "Group " + currentGroup + "/" + totalGroups);
+    }
+
+    private String safeString(String value) {
+        return value == null ? "" : value;
     }
 }

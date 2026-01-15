@@ -42,6 +42,10 @@ public class SqlBuilder {
                 + ");";
     }
 
+    public String getTargetTable() {
+        return TABLE_NAME;
+    }
+
     public String buildCreateIndexSql() {
         return "CREATE INDEX IF NOT EXISTS idx_dm_prod_offer_ind_list_leshan_date_no_datetime "
                 + "ON " + TABLE_NAME + " (date_no, datetime);";
