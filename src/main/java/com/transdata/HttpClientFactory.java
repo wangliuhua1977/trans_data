@@ -42,9 +42,9 @@ public class HttpClientFactory {
                         .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
                         .build();
                 connectionManagerBuilder.setSSLSocketFactory(sslSocketFactory);
-                LOGGER.info("HTTPS insecure mode is enabled (trust-all + no hostname verification).");
+                LOGGER.info("已启用 HTTPS 不安全模式（信任所有证书 + 关闭 Hostname 校验）。");
             } catch (Exception ex) {
-                LOGGER.warn("Failed to initialize insecure SSL context: {}", ex.getMessage());
+                LOGGER.warn("初始化不安全 SSL 上下文失败: {}", ex.getMessage());
             }
         }
 

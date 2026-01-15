@@ -56,7 +56,7 @@ public class SchedulerService {
         if (runningFuture != null) {
             runningFuture.cancel(true);
         }
-        uiLog.log("INFO", "Scheduler stopped.");
+        uiLog.log("INFO", "调度已停止。");
     }
 
     public synchronized void reschedule() {
@@ -77,15 +77,15 @@ public class SchedulerService {
             return;
         }
         if (!config.isScheduleEnabled()) {
-            uiLog.log("INFO", "Schedule disabled; skipping run.");
+            uiLog.log("INFO", "调度已关闭，跳过本次执行。");
             return;
         }
         if (!isWithinWindow()) {
-            uiLog.log("INFO", "out of window, skipped");
+            uiLog.log("INFO", "当前不在时间窗口内，已跳过。");
             return;
         }
         if (runningFuture != null && !runningFuture.isDone()) {
-            uiLog.log("WARN", "Previous job still running; skipping this trigger.");
+            uiLog.log("WARN", "上一轮任务仍在执行，已跳过本次触发。");
             return;
         }
         runningFuture = worker.submit(jobFactory.create(cancelled));
@@ -97,7 +97,7 @@ public class SchedulerService {
     private void scheduleWithInterval() {
         long interval = Math.max(1, config.getIntervalSeconds());
         scheduledFuture = scheduler.scheduleWithFixedDelay(() -> triggerOnceSafely(true), 0, interval, TimeUnit.SECONDS);
-        uiLog.log("INFO", "Scheduler started with interval " + interval + " seconds.");
+        uiLog.log("INFO", "调度已启动，间隔 " + interval + " 秒。");
     }
 
     private boolean isWithinWindow() {
@@ -121,9 +121,9 @@ public class SchedulerService {
             runningFuture.get();
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            uiLog.log("WARN", "Scheduler interrupted while waiting for job completion.");
+            uiLog.log("WARN", "等待任务完成时调度线程被中断。");
         } catch (Exception ex) {
-            uiLog.log("ERROR", "Scheduled job execution failed: " + ex.getMessage());
+            uiLog.log("ERROR", "调度任务执行失败: " + ex.getMessage());
         }
     }
 

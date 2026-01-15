@@ -8,13 +8,14 @@
 - 默认启动即开始调度（00:00:00-23:59:59、180 秒间隔），可“立即执行一次 / 开始 / 暂停”。
 - 数据处理全程后台线程执行，EDT 仅做 UI 渲染，确保界面不卡死。
 - HTTPS 支持“信任所有证书 + 关闭 Hostname 校验”，并提供开关（默认开启）。
+- UI 日志仅保留最近 1000 行，滚动查看且不会无限增长。
 
 ## 端到端流程
 
-1. **分布式锁**：每次任务启动先抢占 Postgres 锁（`leshan.trans_data_job_lock`），未获取锁则记录 “another instance is running” 并跳过本次运行。
+1. **分布式锁**：每次任务启动先抢占 Postgres 锁（`leshan.trans_data_job_lock`），未获取锁则记录“已有其他实例在运行”并跳过本次运行。
 2. **拉取数据**：HTTP POST 请求数据源接口，`code==1` 且 `data` 为数组才进入写入流程。
 3. **解析与分组**：把 `data` 解析为记录并按 `(date_no, datetime)` 分组，生成 `runId`。
-4. **分段入库（staging）**：按可配置 batchSize 将数据插入临时表 `leshan.stg_dm_prod_offer_ind_list_leshan`（包含 `run_id`）。
+4. **分段入库（staging）**：按可配置 batchSize（默认 100）将数据插入临时表 `leshan.stg_dm_prod_offer_ind_list_leshan`（包含 `run_id`）。
 5. **应用到目标表**：在事务中删除目标表当前 `runId` 的 `(date_no, datetime)` 范围，再从 staging 按 `run_id` 插入。
 6. **稽核校验**：针对当前 `(date_no, datetime)` scope 校验分组 count / 总数 / distinct order_item_id。
 7. **失败自动修复**：稽核失败则清理目标 scope 与 staging 并重试；超过最大重试次数则失败并确保无脏数据。
@@ -31,42 +32,43 @@ java -jar target/trans_data-1.0.0.jar
 
 默认配置文件：`src/main/resources/config.properties`（作为模板）。
 运行时配置会自动持久化到：`~/.trans_data/config.properties`。
+配置文件以 UTF-8 读写，避免中文乱码。
 
 ```properties
-# source
+# 源接口
 source.url=http://sctelyidalowcode.paas.sc.ctc.com/app-api/YD2502252B0X/mysql
 source.header.x-app-id=940
 source.header.easy-app-key=
 source.body={}
 
-# async sql
+# 异步 SQL
 asyncsql.baseUrl=https://leshan.paas.sc.ctc.com/waf/api
 asyncsql.token=
 asyncsql.dbUser=leshan
 
-# crypto
+# 加密
 crypto.aesKey=
 crypto.aesIv=
 crypto.keyFormat=base64
 
-# schedule defaults
+# 调度默认值
 schedule.enabled=true
 schedule.intervalSeconds=180
 schedule.windowStart=00:00:00
 schedule.windowEnd=23:59:59
-schedule.batchSize=500
+schedule.batchSize=100
 
-# logging
+# 日志
 logging.sql.maxChars=20000
 logging.sql.dumpDir=logs/sql
 
-# https
+# HTTPS
 https.insecure=true
 
-# async sql
+# 异步 SQL
 asyncsql.maxWaitSeconds=900
 
-# job lock & retries
+# 任务锁与重试
 lock.name=trans_data_job
 lock.leaseSeconds=300
 job.maxRetries=3
@@ -79,7 +81,7 @@ job.maxRetries=3
 - **https.insecure**：`true` 时信任所有证书并关闭 Hostname 校验（默认开启）。
 - **schedule.windowStart / schedule.windowEnd**：支持跨午夜，如 `23:00:00` → `02:00:00`。
 - **schedule.intervalSeconds**：调度周期；UI 修改后立即生效。
-- **schedule.batchSize**：分段大小（默认 500），用于 staging/插入分段。
+- **schedule.batchSize**：分段大小（默认 100），用于 staging/插入分段，可在 UI 中调整并持久化。
 - **logging.sql.maxChars**：SQL/JSON 日志最大展示字符数，超过阈值会截断输出。
 - **logging.sql.dumpDir**：SQL 超长时的落盘目录（按日期分目录）。
 - **asyncsql.maxWaitSeconds**：轮询最大等待时长（秒），超时会结束轮询并记录错误。
@@ -154,16 +156,16 @@ CREATE INDEX IF NOT EXISTS idx_stg_dm_prod_offer_run_id
 - **分布式锁**：基于 `leshan.trans_data_job_lock` 实现跨进程互斥；支持租约续期，确保长任务不被抢占。
 - **staging + apply + audit**：先入 staging，再事务性删除 scope 并写入目标表，随后稽核；失败自动清理重试。
 - **稽核机制**：按 `(date_no, datetime)` 分组 count 校验 + scope 总数 + distinct `order_item_id` 校验。
-- **配置默认值**：`schedule.batchSize=500`、`lock.leaseSeconds=300`、`job.maxRetries=3`。
+- **配置默认值**：`schedule.batchSize=100`、`lock.leaseSeconds=300`、`job.maxRetries=3`。
 - **故障自愈**：稽核失败时清理目标 scope 与 staging，确保无脏数据残留。
 
 ## UI 与日志
 
-- **进度**：展示当前阶段（Locking/Fetching/Grouping/Preparing/Staging/Applying/Auditing/Cleaning/Encrypting/Submitting/Polling/Done/Skipped/Failed）。
+- **进度**：展示当前阶段（锁定中/获取中/分组中/准备中/分段写入中/应用中/稽核中/清理中/加密中/提交中/轮询中/完成/已跳过/失败/已取消）。
 - **统计**：拉取条数、分组数、分段进度、当前 jobId。
 - **轮询状态**：轮询阶段会显示当前状态、耗时与进度百分比（若后端返回），并仅在状态变化时记录日志。
 - **SQL 记录**：提交前会输出实际 SQL。若 SQL 超过 `logging.sql.maxChars`，日志显示前后片段并提示落盘路径，完整 SQL 写入 `logging.sql.dumpDir/{yyyyMMdd}/sql_{requestId}_{context}_{groupKey}.sql`。
-- **日志**：每行包含时间戳与级别，且显示 requestId、jobId、耗时等关键信息；取消/中断会明确标记为“Cancelled by user”或“Polling interrupted by stop()”。
+- **日志**：每行包含时间戳与级别，且显示 requestId、jobId、耗时等关键信息；每次传输任务开始/结束都会输出醒目的分隔块；UI 日志最多保留 1000 行。
 
 ## 排障建议
 

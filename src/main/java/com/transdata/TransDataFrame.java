@@ -16,6 +16,7 @@ import javax.swing.JSpinner;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JToolBar;
+import javax.swing.JScrollBar;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
@@ -30,28 +31,34 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TransDataFrame extends JFrame implements UiLogSink, ProgressListener {
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final int MAX_LOG_LINES = 1000;
+    private static final int SCROLL_BOTTOM_THRESHOLD = 20;
 
     private final AppConfig config;
     private final JTextField startField = new JTextField(8);
     private final JTextField endField = new JTextField(8);
     private final JSpinner intervalValue = new JSpinner(new SpinnerNumberModel(180, 1, 86400, 1));
-    private final JComboBox<String> intervalUnit = new JComboBox<>(new String[]{"Seconds", "Minutes"});
-    private final JSpinner batchSizeField = new JSpinner(new SpinnerNumberModel(100, 100, 100, 1));
-    private final JCheckBox insecureCheck = new JCheckBox("HTTPS insecure");
+    private final JComboBox<String> intervalUnit = new JComboBox<>(new String[]{"秒", "分钟"});
+    private final JSpinner batchSizeField = new JSpinner(new SpinnerNumberModel(100, 50, 5000, 50));
+    private final JCheckBox insecureCheck = new JCheckBox("HTTPS 不安全模式");
     private final JButton runOnceButton = new JButton("立即执行一次");
     private final JButton startButton = new JButton("开始");
     private final JButton pauseButton = new JButton("暂停");
     private final JButton clearButton = new JButton("清空日志");
 
     private final JProgressBar progressBar = new JProgressBar(0, 100);
-    private final JLabel stageLabel = new JLabel("Idle");
-    private final JLabel statsLabel = new JLabel("Ready");
-    private final JLabel pollingLabel = new JLabel("Polling: -");
+    private final JLabel stageLabel = new JLabel("空闲");
+    private final JLabel statsLabel = new JLabel("就绪");
+    private final JLabel pollingLabel = new JLabel("轮询：-");
     private final JTextArea logArea = new JTextArea();
+    private final Deque<String> logLines = new ArrayDeque<>(MAX_LOG_LINES);
+    private JScrollPane logScrollPane;
 
     private SchedulerService schedulerService;
 
@@ -68,7 +75,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
 
     public void startSchedulerOnLaunch() {
         if (config.isHttpsInsecure()) {
-            log("INFO", "HTTPS insecure mode is enabled (trust-all + no hostname verification).");
+            log("INFO", "已启用 HTTPS 不安全模式（信任所有证书 + 关闭 Hostname 校验）。");
         }
         schedulerService.start();
     }
@@ -99,7 +106,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         topPanel.add(intervalUnit, gbc);
 
         gbc.gridx = 3;
-        topPanel.add(new JLabel("分段大小(固定100)"), gbc);
+        topPanel.add(new JLabel("分段大小"), gbc);
         gbc.gridx = 4;
         topPanel.add(batchSizeField, gbc);
 
@@ -135,11 +142,11 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         progressPanel.add(pollingLabel, pgbc);
 
         logArea.setEditable(false);
-        JScrollPane scrollPane = new JScrollPane(logArea);
-        scrollPane.setPreferredSize(new Dimension(900, 300));
+        logScrollPane = new JScrollPane(logArea);
+        logScrollPane.setPreferredSize(new Dimension(900, 300));
         JPanel logPanel = new JPanel(new BorderLayout());
         logPanel.setBorder(BorderFactory.createTitledBorder("日志"));
-        logPanel.add(scrollPane, BorderLayout.CENTER);
+        logPanel.add(logScrollPane, BorderLayout.CENTER);
 
         JPanel centerPanel = new JPanel(new BorderLayout());
         centerPanel.add(progressPanel, BorderLayout.NORTH);
@@ -166,10 +173,16 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     private void initConfigValues() {
         startField.setText(config.getWindowStart().format(TIME_FORMATTER));
         endField.setText(config.getWindowEnd().format(TIME_FORMATTER));
-        intervalValue.setValue(config.getIntervalSeconds());
-        intervalUnit.setSelectedIndex(0);
-        batchSizeField.setValue(100);
-        batchSizeField.setEnabled(false);
+        int intervalSeconds = config.getIntervalSeconds();
+        if (intervalSeconds % 60 == 0 && intervalSeconds >= 60) {
+            intervalValue.setValue(intervalSeconds / 60);
+            intervalUnit.setSelectedIndex(1);
+        } else {
+            intervalValue.setValue(intervalSeconds);
+            intervalUnit.setSelectedIndex(0);
+        }
+        int batchSize = Math.max(50, Math.min(5000, config.getBatchSize()));
+        batchSizeField.setValue(batchSize);
         insecureCheck.setSelected(config.isHttpsInsecure());
     }
 
@@ -181,7 +194,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
             schedulerService.start();
         });
         pauseButton.addActionListener(event -> schedulerService.stop());
-        clearButton.addActionListener(event -> logArea.setText(""));
+        clearButton.addActionListener(event -> clearLogArea());
 
         DocumentListener documentListener = new DocumentListener() {
             @Override
@@ -204,6 +217,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
 
         intervalValue.addChangeListener(event -> applyConfigChanges());
         intervalUnit.addActionListener(event -> applyConfigChanges());
+        batchSizeField.addChangeListener(event -> applyConfigChanges());
         insecureCheck.addActionListener(event -> applyConfigChanges());
     }
 
@@ -218,8 +232,10 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         }
         int interval = (Integer) intervalValue.getValue();
         String unit = (String) intervalUnit.getSelectedItem();
-        int seconds = "Minutes".equals(unit) ? interval * 60 : interval;
+        int seconds = "分钟".equals(unit) ? interval * 60 : interval;
         config.setIntervalSeconds(seconds);
+        int batchSize = (Integer) batchSizeField.getValue();
+        config.setBatchSize(batchSize);
         config.setHttpsInsecure(insecureCheck.isSelected());
         config.save();
         if (config.isScheduleEnabled()) {
@@ -253,14 +269,26 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     public void log(String level, String message) {
         SwingUtilities.invokeLater(() -> {
             String timestamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-            logArea.append(timestamp + " [" + level + "] " + message + "\n");
-            logArea.setCaretPosition(logArea.getDocument().getLength());
+            boolean shouldScroll = isScrollNearBottom();
+            String line = timestamp + " [" + level + "] " + message;
+            logLines.addLast(line);
+            while (logLines.size() > MAX_LOG_LINES) {
+                logLines.removeFirst();
+            }
+            StringBuilder builder = new StringBuilder();
+            for (String entry : logLines) {
+                builder.append(entry).append("\n");
+            }
+            logArea.setText(builder.toString());
+            if (shouldScroll) {
+                logArea.setCaretPosition(logArea.getDocument().getLength());
+            }
         });
     }
 
     @Override
     public void updateStage(String stage) {
-        SwingUtilities.invokeLater(() -> stageLabel.setText("Stage: " + stage));
+        SwingUtilities.invokeLater(() -> stageLabel.setText("阶段：" + stage));
     }
 
     @Override
@@ -274,11 +302,11 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     @Override
     public void updateStats(TransferStats stats) {
         SwingUtilities.invokeLater(() -> {
-            String label = "Records: " + stats.getTotalRecords()
-                    + ", Groups: " + stats.getTotalGroups()
-                    + ", Segment: " + stats.getCurrentBatch() + "/" + stats.getTotalBatches();
+            String label = "记录数：" + stats.getTotalRecords()
+                    + "，分组数：" + stats.getTotalGroups()
+                    + "，分段：" + stats.getCurrentBatch() + "/" + stats.getTotalBatches();
             if (stats.getJobId() != null && !stats.getJobId().isBlank()) {
-                label += ", jobId=" + stats.getJobId();
+                label += "，作业ID=" + stats.getJobId();
             }
             statsLabel.setText(label);
         });
@@ -288,9 +316,27 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     public void updatePolling(String status, long elapsedMillis, Integer progressPercent) {
         SwingUtilities.invokeLater(() -> {
             String progress = progressPercent == null || progressPercent < 0 ? "-" : progressPercent + "%";
-            String label = "Polling: status=" + status + ", elapsed=" + String.format("%.1fs", elapsedMillis / 1000.0)
-                    + ", progress=" + progress;
+            String label = "轮询：状态=" + status + "，耗时=" + String.format("%.1fs", elapsedMillis / 1000.0)
+                    + "，进度=" + progress;
             pollingLabel.setText(label);
         });
+    }
+
+    private void clearLogArea() {
+        SwingUtilities.invokeLater(() -> {
+            logLines.clear();
+            logArea.setText("");
+        });
+    }
+
+    private boolean isScrollNearBottom() {
+        if (logScrollPane == null) {
+            return true;
+        }
+        JScrollBar verticalBar = logScrollPane.getVerticalScrollBar();
+        int value = verticalBar.getValue();
+        int extent = verticalBar.getModel().getExtent();
+        int maximum = verticalBar.getMaximum();
+        return value + extent >= maximum - SCROLL_BOTTOM_THRESHOLD;
     }
 }
