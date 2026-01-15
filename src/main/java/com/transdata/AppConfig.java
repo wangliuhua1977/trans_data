@@ -210,6 +210,18 @@ public class AppConfig {
         setInt("schedule.batchSize", batchSize);
     }
 
+    public synchronized String getLockName() {
+        return getString("lock.name");
+    }
+
+    public synchronized int getLockLeaseSeconds() {
+        return getInt("lock.leaseSeconds", 300);
+    }
+
+    public synchronized int getJobMaxRetries() {
+        return getInt("job.maxRetries", 3);
+    }
+
     public synchronized boolean isHttpsInsecure() {
         return getBoolean("https.insecure", true);
     }
