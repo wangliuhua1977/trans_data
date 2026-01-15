@@ -4,19 +4,23 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.core5.util.Timeout;
 
 import javax.swing.BorderFactory;
+import javax.swing.DefaultListCellRenderer;
+import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
-import javax.swing.JLabel;
+import javax.swing.JList;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
+import javax.swing.JSplitPane;
+import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JToolBar;
-import javax.swing.JScrollBar;
+import javax.swing.ListSelectionModel;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
@@ -29,232 +33,710 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
-import java.util.Deque;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class TransDataFrame extends JFrame implements UiLogSink, ProgressListener {
-    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
-    private static final int MAX_LOG_LINES = 1000;
-    private static final int SCROLL_BOTTOM_THRESHOLD = 20;
-
+public class TransDataFrame extends JFrame {
     private final AppConfig config;
-    private final JTextField startField = new JTextField(8);
-    private final JTextField endField = new JTextField(8);
+    private final TaskStore taskStore;
+    private final DefaultListModel<TaskDefinition> taskListModel = new DefaultListModel<>();
+    private final JList<TaskDefinition> taskList = new JList<>(taskListModel);
+    private final Map<String, UiLogPanel> logPanels = new HashMap<>();
+    private final Map<String, TaskStatusPanel> statusPanels = new HashMap<>();
+    private final Map<String, TaskScheduler> schedulers = new HashMap<>();
+    private final ExecutorService backgroundExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread thread = new Thread(r, "trans-data-ui-worker");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private TaskDefinition selectedTask;
+    private boolean updatingFields = false;
+
+    private final JTextField taskIdField = new JTextField(32);
+    private final JTextField taskNameField = new JTextField(24);
+    private final JCheckBox enabledCheck = new JCheckBox("启用任务");
+    private final JTextField sourceUrlField = new JTextField(32);
+    private final JTextArea sourceBodyArea = new JTextArea(6, 32);
+    private final JSpinner batchSizeSpinner = new JSpinner(new SpinnerNumberModel(100, 1, 10000, 1));
+
     private final JSpinner intervalValue = new JSpinner(new SpinnerNumberModel(180, 1, 86400, 1));
-    private final JComboBox<String> intervalUnit = new JComboBox<>(new String[]{"秒", "分钟"});
-    private final JSpinner batchSizeField = new JSpinner(new SpinnerNumberModel(100, 50, 5000, 50));
-    private final JCheckBox insecureCheck = new JCheckBox("HTTPS 不安全模式");
-    private final JButton runOnceButton = new JButton("立即执行一次");
-    private final JButton startButton = new JButton("开始");
-    private final JButton pauseButton = new JButton("暂停");
-    private final JButton clearButton = new JButton("清空日志");
+    private final JTextField windowStartField = new JTextField(8);
+    private final JTextField windowEndField = new JTextField(8);
+    private final JSpinner maxRetriesSpinner = new JSpinner(new SpinnerNumberModel(3, 1, 20, 1));
+    private final JSpinner leaseSecondsSpinner = new JSpinner(new SpinnerNumberModel(300, 30, 3600, 30));
 
-    private final JProgressBar progressBar = new JProgressBar(0, 100);
-    private final JLabel stageLabel = new JLabel("空闲");
-    private final JLabel statsLabel = new JLabel("就绪");
-    private final JLabel pollingLabel = new JLabel("轮询：-");
-    private final JTextArea logArea = new JTextArea();
-    private final Deque<String> logLines = new ArrayDeque<>(MAX_LOG_LINES);
-    private JScrollPane logScrollPane;
+    private final JTextField targetSchemaField = new JTextField(10);
+    private final JTextField targetTableField = new JTextField(20);
+    private final JTextArea createTableArea = new JTextArea(6, 32);
+    private final JComboBox<InsertMode> insertModeCombo = new JComboBox<>(InsertMode.values());
+    private final JTextArea insertTemplateArea = new JTextArea(6, 32);
+    private final JTextField conflictTargetField = new JTextField(20);
+    private final JTextField scopeKeyField = new JTextField(24);
+    private final JTextField naturalKeyField = new JTextField(24);
+    private final JTextField distinctKeyField = new JTextField(24);
 
-    private SchedulerService schedulerService;
+    private final JTextArea testResponseArea = new JTextArea();
+    private final JTextField testStatusField = new JTextField(20);
+    private final JTextField testElapsedField = new JTextField(20);
+    private final JTextField testSizeField = new JTextField(20);
+
+    private JPanel logsContainer;
 
     public TransDataFrame(AppConfig config) {
         this.config = config;
+        this.taskStore = new TaskStore(config);
         setTitle("trans_data - 数据传输");
-        setSize(980, 640);
+        setSize(1200, 720);
         setLocationRelativeTo(null);
         setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
         initLayout();
-        initConfigValues();
         initActions();
+        loadTasks();
     }
 
     public void startSchedulerOnLaunch() {
-        if (config.isHttpsInsecure()) {
-            log("INFO", "已启用 HTTPS 不安全模式（信任所有证书 + 关闭 Hostname 校验）。");
+        for (TaskDefinition task : getTasks()) {
+            if (task.isEnabled()) {
+                ensureScheduler(task).start();
+            }
         }
-        schedulerService.start();
     }
 
     private void initLayout() {
-        JPanel topPanel = new JPanel(new GridBagLayout());
-        topPanel.setBorder(BorderFactory.createTitledBorder("配置"));
+        JSplitPane splitPane = new JSplitPane();
+        splitPane.setResizeWeight(0.2);
+        splitPane.setLeftComponent(buildTaskListPanel());
+        splitPane.setRightComponent(buildDetailPanel());
+        getContentPane().setLayout(new BorderLayout());
+        getContentPane().add(splitPane, BorderLayout.CENTER);
+
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                schedulers.values().forEach(TaskScheduler::stop);
+                backgroundExecutor.shutdownNow();
+            }
+        });
+    }
+
+    private JPanel buildTaskListPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createTitledBorder("任务列表"));
+        taskList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        taskList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public java.awt.Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                                                                   boolean isSelected, boolean cellHasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof TaskDefinition task) {
+                    setText(task.displayName());
+                }
+                return this;
+            }
+        });
+        panel.add(new JScrollPane(taskList), BorderLayout.CENTER);
+
+        JButton addButton = new JButton("新增");
+        JButton deleteButton = new JButton("删除");
+        JButton toggleButton = new JButton("启用/停用");
+        JToolBar toolBar = new JToolBar();
+        toolBar.setFloatable(false);
+        toolBar.add(addButton);
+        toolBar.add(deleteButton);
+        toolBar.add(toggleButton);
+        panel.add(toolBar, BorderLayout.SOUTH);
+
+        addButton.addActionListener(event -> addTask());
+        deleteButton.addActionListener(event -> deleteSelectedTask());
+        toggleButton.addActionListener(event -> toggleTaskEnabled());
+
+        taskList.addListSelectionListener(event -> {
+            if (!event.getValueIsAdjusting()) {
+                TaskDefinition task = taskList.getSelectedValue();
+                setSelectedTask(task);
+            }
+        });
+        return panel;
+    }
+
+    private JPanel buildDetailPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createTitledBorder("任务详情"));
+
+        JToolBar toolbar = new JToolBar();
+        toolbar.setFloatable(false);
+        JButton runOnceButton = new JButton("立即执行一次");
+        JButton startButton = new JButton("启动调度");
+        JButton stopButton = new JButton("停止调度");
+        toolbar.add(runOnceButton);
+        toolbar.add(startButton);
+        toolbar.add(stopButton);
+
+        runOnceButton.addActionListener(event -> runSelectedTaskOnce());
+        startButton.addActionListener(event -> startSelectedTask());
+        stopButton.addActionListener(event -> stopSelectedTask());
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("基础", buildBasicPanel());
+        tabs.addTab("调度", buildSchedulePanel());
+        tabs.addTab("目标与插入", buildTargetPanel());
+        tabs.addTab("测试", buildTestPanel());
+        logsContainer = buildLogsPanel();
+        tabs.addTab("日志", logsContainer);
+
+        panel.add(toolbar, BorderLayout.NORTH);
+        panel.add(tabs, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JPanel buildBasicPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(4, 4, 4, 4);
+        gbc.anchor = GridBagConstraints.WEST;
+
+        taskIdField.setEditable(false);
+
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        panel.add(new javax.swing.JLabel("任务ID"), gbc);
+        gbc.gridx = 1;
+        panel.add(taskIdField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        panel.add(new javax.swing.JLabel("任务名称"), gbc);
+        gbc.gridx = 1;
+        panel.add(taskNameField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        panel.add(new javax.swing.JLabel("启用状态"), gbc);
+        gbc.gridx = 1;
+        panel.add(enabledCheck, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 3;
+        panel.add(new javax.swing.JLabel("源 POST URL"), gbc);
+        gbc.gridx = 1;
+        panel.add(sourceUrlField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        gbc.anchor = GridBagConstraints.NORTHWEST;
+        panel.add(new javax.swing.JLabel("请求体"), gbc);
+        gbc.gridx = 1;
+        panel.add(new JScrollPane(sourceBodyArea), gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 5;
+        gbc.anchor = GridBagConstraints.WEST;
+        panel.add(new javax.swing.JLabel("分段大小"), gbc);
+        gbc.gridx = 1;
+        panel.add(batchSizeSpinner, gbc);
+
+        return panel;
+    }
+
+    private JPanel buildSchedulePanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(4, 4, 4, 4);
         gbc.anchor = GridBagConstraints.WEST;
 
         gbc.gridx = 0;
         gbc.gridy = 0;
-        topPanel.add(new JLabel("窗口开始"), gbc);
+        panel.add(new javax.swing.JLabel("间隔（秒）"), gbc);
         gbc.gridx = 1;
-        topPanel.add(startField, gbc);
-        gbc.gridx = 2;
-        topPanel.add(new JLabel("窗口结束"), gbc);
-        gbc.gridx = 3;
-        topPanel.add(endField, gbc);
+        panel.add(intervalValue, gbc);
 
         gbc.gridx = 0;
         gbc.gridy = 1;
-        topPanel.add(new JLabel("执行间隔"), gbc);
+        panel.add(new javax.swing.JLabel("窗口开始"), gbc);
         gbc.gridx = 1;
-        topPanel.add(intervalValue, gbc);
-        gbc.gridx = 2;
-        topPanel.add(intervalUnit, gbc);
+        panel.add(windowStartField, gbc);
 
-        gbc.gridx = 3;
-        topPanel.add(new JLabel("分段大小"), gbc);
-        gbc.gridx = 4;
-        topPanel.add(batchSizeField, gbc);
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        panel.add(new javax.swing.JLabel("窗口结束"), gbc);
+        gbc.gridx = 1;
+        panel.add(windowEndField, gbc);
 
-        gbc.gridx = 5;
-        topPanel.add(insecureCheck, gbc);
+        gbc.gridx = 0;
+        gbc.gridy = 3;
+        panel.add(new javax.swing.JLabel("最大重试"), gbc);
+        gbc.gridx = 1;
+        panel.add(maxRetriesSpinner, gbc);
 
-        JToolBar toolbar = new JToolBar();
-        toolbar.setFloatable(false);
-        toolbar.add(runOnceButton);
-        toolbar.add(startButton);
-        toolbar.add(pauseButton);
-        toolbar.add(clearButton);
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        panel.add(new javax.swing.JLabel("锁租约秒数"), gbc);
+        gbc.gridx = 1;
+        panel.add(leaseSecondsSpinner, gbc);
 
-        JPanel progressPanel = new JPanel(new GridBagLayout());
-        progressPanel.setBorder(BorderFactory.createTitledBorder("进度"));
-        GridBagConstraints pgbc = new GridBagConstraints();
-        pgbc.insets = new Insets(4, 4, 4, 4);
-        pgbc.anchor = GridBagConstraints.WEST;
-        pgbc.gridx = 0;
-        pgbc.gridy = 0;
-        pgbc.fill = GridBagConstraints.HORIZONTAL;
-        pgbc.weightx = 1.0;
-        progressBar.setStringPainted(true);
-        progressPanel.add(progressBar, pgbc);
-
-        pgbc.gridy = 1;
-        progressPanel.add(stageLabel, pgbc);
-
-        pgbc.gridy = 2;
-        progressPanel.add(statsLabel, pgbc);
-
-        pgbc.gridy = 3;
-        progressPanel.add(pollingLabel, pgbc);
-
-        logArea.setEditable(false);
-        logScrollPane = new JScrollPane(logArea);
-        logScrollPane.setPreferredSize(new Dimension(900, 300));
-        JPanel logPanel = new JPanel(new BorderLayout());
-        logPanel.setBorder(BorderFactory.createTitledBorder("日志"));
-        logPanel.add(logScrollPane, BorderLayout.CENTER);
-
-        JPanel centerPanel = new JPanel(new BorderLayout());
-        centerPanel.add(progressPanel, BorderLayout.NORTH);
-        centerPanel.add(logPanel, BorderLayout.CENTER);
-
-        JPanel northPanel = new JPanel(new BorderLayout());
-        northPanel.add(topPanel, BorderLayout.CENTER);
-        northPanel.add(toolbar, BorderLayout.SOUTH);
-
-        getContentPane().setLayout(new BorderLayout());
-        getContentPane().add(northPanel, BorderLayout.NORTH);
-        getContentPane().add(centerPanel, BorderLayout.CENTER);
-
-        schedulerService = new SchedulerService(config, this::createJob, this);
-
-        addWindowListener(new WindowAdapter() {
-            @Override
-            public void windowClosing(WindowEvent e) {
-                schedulerService.stop();
-            }
-        });
+        return panel;
     }
 
-    private void initConfigValues() {
-        startField.setText(config.getWindowStart().format(TIME_FORMATTER));
-        endField.setText(config.getWindowEnd().format(TIME_FORMATTER));
-        int intervalSeconds = config.getIntervalSeconds();
-        if (intervalSeconds % 60 == 0 && intervalSeconds >= 60) {
-            intervalValue.setValue(intervalSeconds / 60);
-            intervalUnit.setSelectedIndex(1);
-        } else {
-            intervalValue.setValue(intervalSeconds);
-            intervalUnit.setSelectedIndex(0);
-        }
-        int batchSize = Math.max(50, Math.min(5000, config.getBatchSize()));
-        batchSizeField.setValue(batchSize);
-        insecureCheck.setSelected(config.isHttpsInsecure());
+    private JPanel buildTargetPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(4, 4, 4, 4);
+        gbc.anchor = GridBagConstraints.WEST;
+
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        panel.add(new javax.swing.JLabel("目标 Schema"), gbc);
+        gbc.gridx = 1;
+        panel.add(targetSchemaField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        panel.add(new javax.swing.JLabel("目标表"), gbc);
+        gbc.gridx = 1;
+        panel.add(targetTableField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.anchor = GridBagConstraints.NORTHWEST;
+        panel.add(new javax.swing.JLabel("建表 SQL"), gbc);
+        gbc.gridx = 1;
+        panel.add(new JScrollPane(createTableArea), gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 3;
+        gbc.anchor = GridBagConstraints.WEST;
+        panel.add(new javax.swing.JLabel("插入模式"), gbc);
+        gbc.gridx = 1;
+        panel.add(insertModeCombo, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        gbc.anchor = GridBagConstraints.NORTHWEST;
+        panel.add(new javax.swing.JLabel("插入模板"), gbc);
+        gbc.gridx = 1;
+        panel.add(new JScrollPane(insertTemplateArea), gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 5;
+        gbc.anchor = GridBagConstraints.WEST;
+        panel.add(new javax.swing.JLabel("冲突目标"), gbc);
+        gbc.gridx = 1;
+        panel.add(conflictTargetField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 6;
+        panel.add(new javax.swing.JLabel("范围键字段"), gbc);
+        gbc.gridx = 1;
+        panel.add(scopeKeyField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 7;
+        panel.add(new javax.swing.JLabel("自然键字段"), gbc);
+        gbc.gridx = 1;
+        panel.add(naturalKeyField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 8;
+        panel.add(new javax.swing.JLabel("去重字段"), gbc);
+        gbc.gridx = 1;
+        panel.add(distinctKeyField, gbc);
+
+        return panel;
+    }
+
+    private JPanel buildTestPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JPanel infoPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(4, 4, 4, 4);
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        infoPanel.add(new javax.swing.JLabel("HTTP 状态"), gbc);
+        gbc.gridx = 1;
+        testStatusField.setEditable(false);
+        infoPanel.add(testStatusField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        infoPanel.add(new javax.swing.JLabel("耗时"), gbc);
+        gbc.gridx = 1;
+        testElapsedField.setEditable(false);
+        infoPanel.add(testElapsedField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        infoPanel.add(new javax.swing.JLabel("响应大小"), gbc);
+        gbc.gridx = 1;
+        testSizeField.setEditable(false);
+        infoPanel.add(testSizeField, gbc);
+
+        JButton testButton = new JButton("测试源接口");
+        testButton.addActionListener(event -> runTest());
+
+        JPanel topPanel = new JPanel(new BorderLayout());
+        topPanel.add(infoPanel, BorderLayout.CENTER);
+        topPanel.add(testButton, BorderLayout.EAST);
+
+        testResponseArea.setEditable(false);
+        testResponseArea.setLineWrap(false);
+        JScrollPane scrollPane = new JScrollPane(testResponseArea);
+        scrollPane.setPreferredSize(new Dimension(800, 400));
+
+        panel.add(topPanel, BorderLayout.NORTH);
+        panel.add(scrollPane, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JPanel buildLogsPanel() {
+        return new JPanel(new BorderLayout());
     }
 
     private void initActions() {
-        runOnceButton.addActionListener(event -> schedulerService.triggerOnce());
-        startButton.addActionListener(event -> {
-            config.setScheduleEnabled(true);
-            config.save();
-            schedulerService.start();
-        });
-        pauseButton.addActionListener(event -> schedulerService.stop());
-        clearButton.addActionListener(event -> clearLogArea());
-
-        DocumentListener documentListener = new DocumentListener() {
+        DocumentListener updateListener = new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
-                applyConfigChanges();
+                applyChanges();
             }
 
             @Override
             public void removeUpdate(DocumentEvent e) {
-                applyConfigChanges();
+                applyChanges();
             }
 
             @Override
             public void changedUpdate(DocumentEvent e) {
-                applyConfigChanges();
+                applyChanges();
             }
         };
-        startField.getDocument().addDocumentListener(documentListener);
-        endField.getDocument().addDocumentListener(documentListener);
+        taskNameField.getDocument().addDocumentListener(updateListener);
+        sourceUrlField.getDocument().addDocumentListener(updateListener);
+        sourceBodyArea.getDocument().addDocumentListener(updateListener);
+        windowStartField.getDocument().addDocumentListener(updateListener);
+        windowEndField.getDocument().addDocumentListener(updateListener);
+        targetSchemaField.getDocument().addDocumentListener(updateListener);
+        targetTableField.getDocument().addDocumentListener(updateListener);
+        createTableArea.getDocument().addDocumentListener(updateListener);
+        insertTemplateArea.getDocument().addDocumentListener(updateListener);
+        conflictTargetField.getDocument().addDocumentListener(updateListener);
+        scopeKeyField.getDocument().addDocumentListener(updateListener);
+        naturalKeyField.getDocument().addDocumentListener(updateListener);
+        distinctKeyField.getDocument().addDocumentListener(updateListener);
 
-        intervalValue.addChangeListener(event -> applyConfigChanges());
-        intervalUnit.addActionListener(event -> applyConfigChanges());
-        batchSizeField.addChangeListener(event -> applyConfigChanges());
-        insecureCheck.addActionListener(event -> applyConfigChanges());
+        enabledCheck.addActionListener(event -> applyChanges());
+        batchSizeSpinner.addChangeListener(event -> applyChanges());
+        intervalValue.addChangeListener(event -> applyChanges());
+        maxRetriesSpinner.addChangeListener(event -> applyChanges());
+        leaseSecondsSpinner.addChangeListener(event -> applyChanges());
+        insertModeCombo.addActionListener(event -> applyChanges());
     }
 
-    private synchronized void applyConfigChanges() {
+    private void loadTasks() {
+        List<TaskDefinition> tasks = taskStore.loadTasks(uiLogForApp());
+        taskListModel.clear();
+        for (TaskDefinition task : tasks) {
+            taskListModel.addElement(task);
+            ensureLogPanel(task);
+            ensureStatusPanel(task);
+        }
+        if (!taskListModel.isEmpty()) {
+            taskList.setSelectedIndex(0);
+        }
+    }
+
+    private List<TaskDefinition> getTasks() {
+        List<TaskDefinition> tasks = new ArrayList<>();
+        for (int i = 0; i < taskListModel.size(); i++) {
+            tasks.add(taskListModel.get(i));
+        }
+        return tasks;
+    }
+
+    private void addTask() {
+        TaskDefinition task = new TaskDefinition();
+        task.setTaskId(UUID.randomUUID().toString());
+        task.setTaskName("新任务");
+        task.setEnabled(false);
+        task.setSourcePostUrl(config.getSourceUrl());
+        task.setSourcePostBody(config.getSourceBody());
+        task.setBatchSize(100);
+        SchedulePolicy policy = new SchedulePolicy();
+        policy.setIntervalSeconds(180);
+        policy.setWindowStart("00:00:00");
+        policy.setWindowEnd("23:59:59");
+        policy.setMaxRetries(3);
+        policy.setLeaseSeconds(300);
+        task.setSchedulePolicy(policy);
+        TargetConfig target = new TargetConfig();
+        target.setTargetSchema("leshan");
+        target.setInsertMode(InsertMode.APPEND);
+        task.setTargetConfig(target);
+        taskListModel.addElement(task);
+        ensureLogPanel(task);
+        ensureStatusPanel(task);
+        saveTasks();
+        taskList.setSelectedValue(task, true);
+    }
+
+    private void deleteSelectedTask() {
+        if (selectedTask == null) {
+            return;
+        }
+        int confirm = JOptionPane.showConfirmDialog(this, "确认删除当前任务？", "确认",
+                JOptionPane.YES_NO_OPTION);
+        if (confirm != JOptionPane.YES_OPTION) {
+            return;
+        }
+        TaskScheduler scheduler = schedulers.remove(selectedTask.getTaskId());
+        if (scheduler != null) {
+            scheduler.stop();
+        }
+        logPanels.remove(selectedTask.getTaskId());
+        statusPanels.remove(selectedTask.getTaskId());
+        taskListModel.removeElement(selectedTask);
+        saveTasks();
+        if (!taskListModel.isEmpty()) {
+            taskList.setSelectedIndex(0);
+        } else {
+            setSelectedTask(null);
+        }
+    }
+
+    private void toggleTaskEnabled() {
+        if (selectedTask == null) {
+            return;
+        }
+        selectedTask.setEnabled(!selectedTask.isEnabled());
+        saveTasks();
+        taskList.repaint();
+        if (selectedTask.isEnabled()) {
+            ensureScheduler(selectedTask).start();
+        } else {
+            stopSelectedTask();
+        }
+        updateFieldsFromSelected();
+    }
+
+    private void setSelectedTask(TaskDefinition task) {
+        selectedTask = task;
+        updateFieldsFromSelected();
+        updateLogsTab();
+    }
+
+    private void updateFieldsFromSelected() {
+        updatingFields = true;
         try {
-            LocalTime start = LocalTime.parse(startField.getText().trim(), TIME_FORMATTER);
-            LocalTime end = LocalTime.parse(endField.getText().trim(), TIME_FORMATTER);
-            config.setWindowStart(start);
-            config.setWindowEnd(end);
-        } catch (Exception ignored) {
-            // keep last valid configuration
-        }
-        int interval = (Integer) intervalValue.getValue();
-        String unit = (String) intervalUnit.getSelectedItem();
-        int seconds = "分钟".equals(unit) ? interval * 60 : interval;
-        config.setIntervalSeconds(seconds);
-        int batchSize = (Integer) batchSizeField.getValue();
-        config.setBatchSize(batchSize);
-        config.setHttpsInsecure(insecureCheck.isSelected());
-        config.save();
-        if (config.isScheduleEnabled()) {
-            schedulerService.reschedule();
+            if (selectedTask == null) {
+                taskIdField.setText("");
+                taskNameField.setText("");
+                enabledCheck.setSelected(false);
+                sourceUrlField.setText("");
+                sourceBodyArea.setText("");
+                batchSizeSpinner.setValue(100);
+                intervalValue.setValue(180);
+                windowStartField.setText("");
+                windowEndField.setText("");
+                maxRetriesSpinner.setValue(3);
+                leaseSecondsSpinner.setValue(300);
+                targetSchemaField.setText("");
+                targetTableField.setText("");
+                createTableArea.setText("");
+                insertModeCombo.setSelectedItem(InsertMode.APPEND);
+                insertTemplateArea.setText("");
+                conflictTargetField.setText("");
+                scopeKeyField.setText("");
+                naturalKeyField.setText("");
+                distinctKeyField.setText("");
+                return;
+            }
+            taskIdField.setText(selectedTask.getTaskId());
+            taskNameField.setText(selectedTask.getTaskName());
+            enabledCheck.setSelected(selectedTask.isEnabled());
+            sourceUrlField.setText(selectedTask.getSourcePostUrl());
+            sourceBodyArea.setText(selectedTask.getSourcePostBody());
+            batchSizeSpinner.setValue(selectedTask.getBatchSize());
+
+            SchedulePolicy schedule = selectedTask.getSchedulePolicy();
+            intervalValue.setValue(schedule.getIntervalSeconds());
+            windowStartField.setText(schedule.getWindowStart());
+            windowEndField.setText(schedule.getWindowEnd());
+            maxRetriesSpinner.setValue(schedule.getMaxRetries());
+            leaseSecondsSpinner.setValue(schedule.getLeaseSeconds());
+
+            TargetConfig target = selectedTask.getTargetConfig();
+            targetSchemaField.setText(target.getTargetSchema());
+            targetTableField.setText(target.getTargetTable());
+            createTableArea.setText(target.getCreateTableSql());
+            insertModeCombo.setSelectedItem(target.getInsertMode());
+            insertTemplateArea.setText(target.getInsertTemplate());
+            conflictTargetField.setText(target.getConflictTarget());
+            scopeKeyField.setText(String.join(",", target.getAuditSettings().getScopeKeyFields()));
+            naturalKeyField.setText(String.join(",", target.getAuditSettings().getNaturalKeyFields()));
+            distinctKeyField.setText(target.getAuditSettings().getDistinctKeyJsonField());
+        } finally {
+            updatingFields = false;
         }
     }
 
-    private Runnable createJob(AtomicBoolean cancelled) {
+    private void applyChanges() {
+        if (updatingFields || selectedTask == null) {
+            return;
+        }
+        selectedTask.setTaskName(taskNameField.getText().trim());
+        selectedTask.setEnabled(enabledCheck.isSelected());
+        selectedTask.setSourcePostUrl(sourceUrlField.getText().trim());
+        selectedTask.setSourcePostBody(sourceBodyArea.getText());
+        selectedTask.setBatchSize((Integer) batchSizeSpinner.getValue());
+
+        SchedulePolicy schedule = selectedTask.getSchedulePolicy();
+        schedule.setIntervalSeconds((Integer) intervalValue.getValue());
+        schedule.setWindowStart(windowStartField.getText().trim());
+        schedule.setWindowEnd(windowEndField.getText().trim());
+        schedule.setMaxRetries((Integer) maxRetriesSpinner.getValue());
+        schedule.setLeaseSeconds((Integer) leaseSecondsSpinner.getValue());
+
+        TargetConfig target = selectedTask.getTargetConfig();
+        target.setTargetSchema(targetSchemaField.getText().trim());
+        target.setTargetTable(targetTableField.getText().trim());
+        target.setCreateTableSql(createTableArea.getText());
+        target.setInsertMode((InsertMode) insertModeCombo.getSelectedItem());
+        target.setInsertTemplate(insertTemplateArea.getText());
+        target.setConflictTarget(conflictTargetField.getText().trim());
+        target.getAuditSettings().setScopeKeyFields(splitFields(scopeKeyField.getText()));
+        target.getAuditSettings().setNaturalKeyFields(splitFields(naturalKeyField.getText()));
+        target.getAuditSettings().setDistinctKeyJsonField(distinctKeyField.getText().trim());
+
+        saveTasks();
+        taskList.repaint();
+        TaskScheduler scheduler = ensureScheduler(selectedTask);
+        if (selectedTask.isEnabled()) {
+            scheduler.reschedule();
+        } else {
+            scheduler.stop();
+        }
+    }
+
+    private List<String> splitFields(String text) {
+        List<String> fields = new ArrayList<>();
+        if (text == null || text.isBlank()) {
+            return fields;
+        }
+        for (String part : text.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isBlank()) {
+                fields.add(trimmed);
+            }
+        }
+        return fields;
+    }
+
+    private void saveTasks() {
+        taskStore.saveTasks(getTasks(), uiLogForApp());
+    }
+
+    private void updateLogsTab() {
+        logsContainer.removeAll();
+        if (selectedTask != null) {
+            JPanel panel = new JPanel(new BorderLayout());
+            TaskStatusPanel statusPanel = ensureStatusPanel(selectedTask);
+            UiLogPanel logPanel = ensureLogPanel(selectedTask);
+            JButton clearButton = new JButton("清空日志");
+            clearButton.addActionListener(event -> logPanel.clear());
+            JPanel top = new JPanel(new BorderLayout());
+            top.add(statusPanel, BorderLayout.CENTER);
+            top.add(clearButton, BorderLayout.EAST);
+            panel.add(top, BorderLayout.NORTH);
+            panel.add(logPanel, BorderLayout.CENTER);
+            logsContainer.add(panel, BorderLayout.CENTER);
+        }
+        logsContainer.revalidate();
+        logsContainer.repaint();
+    }
+
+    private void runSelectedTaskOnce() {
+        if (selectedTask == null) {
+            return;
+        }
+        ensureScheduler(selectedTask).triggerOnce();
+    }
+
+    private void startSelectedTask() {
+        if (selectedTask == null) {
+            return;
+        }
+        selectedTask.setEnabled(true);
+        saveTasks();
+        ensureScheduler(selectedTask).start();
+        updateFieldsFromSelected();
+        taskList.repaint();
+    }
+
+    private void stopSelectedTask() {
+        if (selectedTask == null) {
+            return;
+        }
+        TaskScheduler scheduler = ensureScheduler(selectedTask);
+        scheduler.stop();
+    }
+
+    private void runTest() {
+        if (selectedTask == null) {
+            return;
+        }
+        UiLogPanel logPanel = ensureLogPanel(selectedTask);
+        testStatusField.setText("测试中...");
+        testElapsedField.setText("");
+        testSizeField.setText("");
+        testResponseArea.setText("");
+        backgroundExecutor.submit(() -> {
+            try {
+                Timeout connectTimeout = Timeout.ofSeconds(10);
+                Timeout responseTimeout = Timeout.ofSeconds(30);
+                HttpClientFactory factory = new HttpClientFactory(config.isHttpsInsecure(), connectTimeout, responseTimeout);
+                try (CloseableHttpClient client = factory.createClient()) {
+                    SourceClient sourceClient = new SourceClient(client, connectTimeout, responseTimeout);
+                    SourceFetchResult result = sourceClient.testPost(selectedTask, config);
+                    SwingUtilities.invokeLater(() -> {
+                        testStatusField.setText(String.valueOf(result.getStatusCode()));
+                        testElapsedField.setText(result.getElapsedMillis() + " ms");
+                        testSizeField.setText(result.getResponseBytes() + " bytes");
+                        testResponseArea.setText(result.getPrettyJson());
+                    });
+                }
+            } catch (Exception ex) {
+                logPanel.log("ERROR", "测试失败：" + ex.getMessage());
+                SwingUtilities.invokeLater(() -> testStatusField.setText("失败"));
+            }
+        });
+    }
+
+    private TaskScheduler ensureScheduler(TaskDefinition task) {
+        return schedulers.computeIfAbsent(task.getTaskId(), key -> new TaskScheduler(task, cancelled -> createJob(task, cancelled),
+                ensureLogPanel(task)));
+    }
+
+    private TaskScheduler.TaskExecutable createJob(TaskDefinition task, AtomicBoolean cancelled) {
         Timeout connectTimeout = Timeout.ofSeconds(10);
         Timeout responseTimeout = Timeout.ofSeconds(30);
         HttpClientFactory factory = new HttpClientFactory(config.isHttpsInsecure(), connectTimeout, responseTimeout);
         CloseableHttpClient client = factory.createClient();
         SourceClient sourceClient = new SourceClient(client, connectTimeout, responseTimeout);
         AsyncSqlClient asyncSqlClient = new AsyncSqlClient(client, connectTimeout, responseTimeout);
-        SqlBuilder sqlBuilder = new SqlBuilder();
-        TransferJob job = new TransferJob(config, sourceClient, asyncSqlClient, sqlBuilder, this, this, cancelled);
+        TaskSqlBuilder sqlBuilder = new TaskSqlBuilder();
+        UiLogPanel logPanel = ensureLogPanel(task);
+        TaskStatusPanel statusPanel = ensureStatusPanel(task);
+        TaskTransferJob job = new TaskTransferJob(task, config, sourceClient, asyncSqlClient, sqlBuilder,
+                logPanel, statusPanel, cancelled);
         return () -> {
             try {
-                job.run();
+                return job.run();
             } finally {
                 try {
                     client.close();
@@ -265,78 +747,16 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         };
     }
 
-    @Override
-    public void log(String level, String message) {
-        SwingUtilities.invokeLater(() -> {
-            String timestamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-            boolean shouldScroll = isScrollNearBottom();
-            String line = timestamp + " [" + level + "] " + message;
-            logLines.addLast(line);
-            while (logLines.size() > MAX_LOG_LINES) {
-                logLines.removeFirst();
-            }
-            StringBuilder builder = new StringBuilder();
-            for (String entry : logLines) {
-                builder.append(entry).append("\n");
-            }
-            logArea.setText(builder.toString());
-            if (shouldScroll) {
-                logArea.setCaretPosition(logArea.getDocument().getLength());
-            }
-        });
+    private UiLogPanel ensureLogPanel(TaskDefinition task) {
+        return logPanels.computeIfAbsent(task.getTaskId(), ignored -> new UiLogPanel());
     }
 
-    @Override
-    public void updateStage(String stage) {
-        SwingUtilities.invokeLater(() -> stageLabel.setText("阶段：" + stage));
+    private TaskStatusPanel ensureStatusPanel(TaskDefinition task) {
+        return statusPanels.computeIfAbsent(task.getTaskId(), ignored -> new TaskStatusPanel());
     }
 
-    @Override
-    public void updateProgress(int percent, String detail) {
-        SwingUtilities.invokeLater(() -> {
-            progressBar.setValue(percent);
-            progressBar.setString(detail);
-        });
-    }
-
-    @Override
-    public void updateStats(TransferStats stats) {
-        SwingUtilities.invokeLater(() -> {
-            String label = "记录数：" + stats.getTotalRecords()
-                    + "，分组数：" + stats.getTotalGroups()
-                    + "，分段：" + stats.getCurrentBatch() + "/" + stats.getTotalBatches();
-            if (stats.getJobId() != null && !stats.getJobId().isBlank()) {
-                label += "，作业ID=" + stats.getJobId();
-            }
-            statsLabel.setText(label);
-        });
-    }
-
-    @Override
-    public void updatePolling(String status, long elapsedMillis, Integer progressPercent) {
-        SwingUtilities.invokeLater(() -> {
-            String progress = progressPercent == null || progressPercent < 0 ? "-" : progressPercent + "%";
-            String label = "轮询：状态=" + status + "，耗时=" + String.format("%.1fs", elapsedMillis / 1000.0)
-                    + "，进度=" + progress;
-            pollingLabel.setText(label);
-        });
-    }
-
-    private void clearLogArea() {
-        SwingUtilities.invokeLater(() -> {
-            logLines.clear();
-            logArea.setText("");
-        });
-    }
-
-    private boolean isScrollNearBottom() {
-        if (logScrollPane == null) {
-            return true;
-        }
-        JScrollBar verticalBar = logScrollPane.getVerticalScrollBar();
-        int value = verticalBar.getValue();
-        int extent = verticalBar.getModel().getExtent();
-        int maximum = verticalBar.getMaximum();
-        return value + extent >= maximum - SCROLL_BOTTOM_THRESHOLD;
+    private UiLogSink uiLogForApp() {
+        UiLogPanel panel = logPanels.computeIfAbsent("_app", ignored -> new UiLogPanel());
+        return panel;
     }
 }
