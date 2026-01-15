@@ -32,17 +32,7 @@ public class SourceClient {
     }
 
     public List<SourceRecord> fetch(AppConfig config, UiLogSink uiLog) throws Exception {
-        HttpPost post = new HttpPost(config.getSourceUrl());
-        post.setHeader("x-app-id", config.getSourceAppId());
-        if (!config.getSourceAppKey().isBlank()) {
-            post.setHeader("EASY-APP-KEY", config.getSourceAppKey());
-        }
-        post.setEntity(new StringEntity(config.getSourceBody(), ContentType.APPLICATION_JSON));
-        RequestConfig requestConfig = RequestConfig.custom()
-                .setConnectTimeout(connectTimeout)
-                .setResponseTimeout(responseTimeout)
-                .build();
-        post.setConfig(requestConfig);
+        HttpPost post = buildPost(config.getSourceUrl(), config.getSourceBody(), config);
 
         try (CloseableHttpResponse response = httpClient.execute(post)) {
             String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
@@ -78,5 +68,76 @@ public class SourceClient {
             LOGGER.info("已从源接口获取 {} 条记录。", records.size());
             return records;
         }
+    }
+
+    public SourceFetchResult fetchJson(TaskDefinition task, AppConfig config, UiLogSink uiLog) throws Exception {
+        String body = task.getSourcePostBody();
+        if (body == null || body.isBlank()) {
+            body = config.getSourceBody();
+        }
+        HttpPost post = buildPost(task.getSourcePostUrl(), body, config);
+        long start = System.currentTimeMillis();
+        try (CloseableHttpResponse response = httpClient.execute(post)) {
+            long elapsed = System.currentTimeMillis() - start;
+            int statusCode = response.getCode();
+            String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
+            int bytes = responseBody.getBytes(StandardCharsets.UTF_8).length;
+            JsonNode root = objectMapper.readTree(responseBody);
+            String pretty = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+            int code = root.path("code").asInt(-1);
+            if (code != 1) {
+                String message = root.path("message").asText("未知");
+                uiLog.log("ERROR", "源接口返回异常：code=" + code + "，message=" + message);
+                throw new IllegalStateException("源接口返回 code " + code + ": " + message);
+            }
+            JsonNode data = root.path("data");
+            if (!data.isArray()) {
+                uiLog.log("ERROR", "源接口响应缺少 data 数组。");
+                throw new IllegalStateException("源接口 data 不是数组");
+            }
+            List<JsonNode> records = new ArrayList<>();
+            for (JsonNode node : data) {
+                records.add(node);
+            }
+            return new SourceFetchResult(statusCode, elapsed, bytes, responseBody, pretty, records);
+        }
+    }
+
+    public SourceFetchResult testPost(TaskDefinition task, AppConfig config) throws Exception {
+        String body = task.getSourcePostBody();
+        if (body == null || body.isBlank()) {
+            body = config.getSourceBody();
+        }
+        HttpPost post = buildPost(task.getSourcePostUrl(), body, config);
+        long start = System.currentTimeMillis();
+        try (CloseableHttpResponse response = httpClient.execute(post)) {
+            long elapsed = System.currentTimeMillis() - start;
+            int statusCode = response.getCode();
+            String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
+            int bytes = responseBody.getBytes(StandardCharsets.UTF_8).length;
+            String pretty = responseBody;
+            try {
+                JsonNode root = objectMapper.readTree(responseBody);
+                pretty = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+            } catch (Exception ignored) {
+                // keep raw
+            }
+            return new SourceFetchResult(statusCode, elapsed, bytes, responseBody, pretty, List.of());
+        }
+    }
+
+    private HttpPost buildPost(String url, String body, AppConfig config) {
+        HttpPost post = new HttpPost(url);
+        post.setHeader("x-app-id", config.getSourceAppId());
+        if (!config.getSourceAppKey().isBlank()) {
+            post.setHeader("EASY-APP-KEY", config.getSourceAppKey());
+        }
+        post.setEntity(new StringEntity(body == null ? "{}" : body, ContentType.APPLICATION_JSON));
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(connectTimeout)
+                .setResponseTimeout(responseTimeout)
+                .build();
+        post.setConfig(requestConfig);
+        return post;
     }
 }

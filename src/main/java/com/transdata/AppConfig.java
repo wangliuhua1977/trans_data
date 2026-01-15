@@ -73,6 +73,10 @@ public class AppConfig {
         }
     }
 
+    public Path getUserConfigPath() {
+        return userConfigPath;
+    }
+
     public synchronized String getString(String key) {
         return properties.getProperty(key, "").trim();
     }
