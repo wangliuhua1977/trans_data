@@ -10,6 +10,7 @@ import java.util.List;
 public class SqlBuilder {
     private static final Logger LOGGER = LoggerFactory.getLogger(SqlBuilder.class);
     private static final String TABLE_NAME = "leshan.dm_prod_offer_ind_list_leshan";
+    private static final int SEGMENT_SIZE = 100;
     private static final String[] COLUMNS = {
             "order_item_id",
             "date_no",
@@ -25,62 +26,28 @@ public class SqlBuilder {
             "accept_date"
     };
 
-    public String buildCreateTableSql() {
-        return "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " ("
-                + "order_item_id varchar,"
-                + "date_no numeric,"
-                + "obj_id varchar,"
-                + "ind_type numeric,"
-                + "accept_staff_id varchar,"
-                + "accept_channel_id varchar,"
-                + "first_staff_id varchar,"
-                + "second_staff_id varchar,"
-                + "dev_staff_id varchar,"
-                + "level5_id varchar,"
-                + "datetime numeric,"
-                + "accept_date varchar"
-                + ");";
-    }
-
     public String getTargetTable() {
         return TABLE_NAME;
     }
 
-    public String buildCreateIndexSql() {
-        return "CREATE INDEX IF NOT EXISTS idx_dm_prod_offer_ind_list_leshan_date_no_datetime "
-                + "ON " + TABLE_NAME + " (date_no, datetime);";
+    public String buildExistenceCheckSql(GroupKey key, UiLogSink uiLog) {
+        String dateNo = numericLiteral(key.getDateNo(), "date_no", uiLog);
+        String datetime = numericLiteral(key.getDatetime(), "datetime", uiLog);
+        return "SELECT 1 FROM " + TABLE_NAME + " WHERE date_no = " + dateNo
+                + " AND datetime = " + datetime + " LIMIT 1;";
     }
 
-    public String buildDeleteSql(GroupKey key) {
-        String dateNo = numericLiteral(key.getDateNo(), "date_no");
-        String datetime = numericLiteral(key.getDatetime(), "datetime");
-        return "DELETE FROM " + TABLE_NAME + " WHERE date_no = " + dateNo + " AND datetime = " + datetime + ";";
-    }
-
-    public List<String> buildInsertSql(List<SourceRecord> records, int batchSize, UiLogSink uiLog) {
+    public List<String> buildInsertSqlSegments(List<SourceRecord> records, UiLogSink uiLog) {
         List<String> statements = new ArrayList<>();
         int total = records.size();
         int start = 0;
         while (start < total) {
-            int end = Math.min(start + batchSize, total);
+            int end = Math.min(start + SEGMENT_SIZE, total);
             List<SourceRecord> batch = records.subList(start, end);
             statements.add(buildInsertBatch(batch, uiLog));
             start = end;
         }
         return statements;
-    }
-
-    public String buildTransactionScript(GroupKey key, List<SourceRecord> records, int batchSize, UiLogSink uiLog) {
-        StringBuilder builder = new StringBuilder();
-        builder.append("BEGIN;");
-        builder.append(buildCreateTableSql());
-        builder.append(buildCreateIndexSql());
-        builder.append(buildDeleteSql(key));
-        for (String insert : buildInsertSql(records, batchSize, uiLog)) {
-            builder.append(insert);
-        }
-        builder.append("COMMIT;");
-        return builder.toString();
     }
 
     private String buildInsertBatch(List<SourceRecord> records, UiLogSink uiLog) {

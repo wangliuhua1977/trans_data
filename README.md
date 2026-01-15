@@ -13,10 +13,11 @@
 
 1. **拉取数据**：HTTP POST 请求数据源接口，`code==1` 且 `data` 为数组才进入写入流程。
 2. **解析与分组**：把 `data` 解析为记录并按 `(date_no, datetime)` 分组。
-3. **构建 SQL**：每组创建事务脚本：`BEGIN` → `CREATE TABLE IF NOT EXISTS` → `DELETE` → 批量 `INSERT` → `COMMIT`。
-4. **加密提交**：使用 AES/CBC/PKCS5Padding 对 SQL 加密（Base64 输出），提交至异步 SQL 服务 `/jobs/submit`。
-5. **轮询状态**：指数退避轮询 `/jobs/status`，终止状态：`SUCCEEDED / FAILED / CANCELLED`。
-6. **获取结果**：`SUCCEEDED` 后请求 `/jobs/result` 输出 `rowsAffected / actualRows` 等指标。
+3. **存在性检查**：仅对本次运行的首个 `(date_no, datetime)` 执行 `SELECT 1 ... LIMIT 1`；若已存在则跳过本次运行。
+4. **分段插入**：存在性检查通过后，将所有记录按固定 100 条一段构建 `INSERT` 语句（不按分组边界切分）。
+5. **加密提交**：使用 AES/CBC/PKCS5Padding 对 SQL 加密（Base64 输出），逐段提交至异步 SQL 服务 `/jobs/submit`。
+6. **轮询状态**：指数退避轮询 `/jobs/status`，终止状态：`SUCCEEDED / FAILED / CANCELLED`。
+7. **获取结果**：`SUCCEEDED` 后在需要时请求 `/jobs/result` 输出 `rowsAffected / actualRows` 等指标。
 
 ## 构建与运行
 
@@ -52,7 +53,6 @@ schedule.enabled=true
 schedule.intervalSeconds=180
 schedule.windowStart=00:00:00
 schedule.windowEnd=23:59:59
-schedule.batchSize=500
 
 # logging
 logging.sql.maxChars=20000
@@ -72,7 +72,7 @@ asyncsql.maxWaitSeconds=900
 - **https.insecure**：`true` 时信任所有证书并关闭 Hostname 校验（默认开启）。
 - **schedule.windowStart / schedule.windowEnd**：支持跨午夜，如 `23:00:00` → `02:00:00`。
 - **schedule.intervalSeconds**：调度周期；UI 修改后立即生效。
-- **schedule.batchSize**：批量插入大小，默认 500。
+- **分段大小**：固定 100 行/段（不再使用可配置 batchSize）。
 - **logging.sql.maxChars**：SQL/JSON 日志最大展示字符数，超过阈值会截断输出。
 - **logging.sql.dumpDir**：SQL 超长时的落盘目录（按日期分目录）。
 - **asyncsql.maxWaitSeconds**：轮询最大等待时长（秒），超时会结束轮询并记录错误。
@@ -99,43 +99,28 @@ asyncsql.maxWaitSeconds=900
 
 ## 表结构与幂等策略
 
-目标表：`leshan.dm_prod_offer_ind_list_leshan`
+目标表：`leshan.dm_prod_offer_ind_list_leshan`（由外部系统管理，本工具不会执行任何 DDL）。
+
+幂等策略：每次拉取按 `(date_no, datetime)` 分组，仅检查首个 groupKey 是否已存在，若存在则跳过本次运行。
+存在性检查 SQL：
 
 ```sql
-CREATE TABLE IF NOT EXISTS leshan.dm_prod_offer_ind_list_leshan (
-  order_item_id varchar,
-  date_no numeric,
-  obj_id varchar,
-  ind_type numeric,
-  accept_staff_id varchar,
-  accept_channel_id varchar,
-  first_staff_id varchar,
-  second_staff_id varchar,
-  dev_staff_id varchar,
-  level5_id varchar,
-  datetime numeric,
-  accept_date varchar
-);
-CREATE INDEX IF NOT EXISTS idx_dm_prod_offer_ind_list_leshan_date_no_datetime
-  ON leshan.dm_prod_offer_ind_list_leshan (date_no, datetime);
+SELECT 1
+FROM leshan.dm_prod_offer_ind_list_leshan
+WHERE date_no = <date_no> AND datetime = <datetime>
+LIMIT 1;
 ```
 
-幂等策略：每次拉取按 `(date_no, datetime)` 分组，每组执行：
-
-1. `BEGIN`
-2. `CREATE TABLE IF NOT EXISTS ...`
-3. `DELETE FROM ... WHERE date_no=? AND datetime=?`
-4. 批量 `INSERT`（按 batchSize 分批）
-5. `COMMIT`
+当首个 groupKey 不存在时，按照固定 100 行/段执行 `INSERT`，不执行任何 `DELETE`，不添加索引，也不包裹事务。
 
 数值字段解析失败将写入 `NULL` 并记录 WARN，不会导致整批失败。
 
 ## UI 与日志
 
-- **进度**：展示当前阶段（Fetching/Grouping/Encrypting/Submitting/Polling/Writing/Done/Failed）。
-- **统计**：拉取条数、分组数、当前组/总组、批次进度、当前 jobId。
+- **进度**：展示当前阶段（Fetching/Grouping/Checking/Encrypting/Submitting/Polling/Writing/Done/Skipped/Failed）。
+- **统计**：拉取条数、分组数、分段进度、当前 jobId。
 - **轮询状态**：轮询阶段会显示当前状态、耗时与进度百分比（若后端返回），并仅在状态变化时记录日志。
-- **SQL 记录**：提交前会输出实际 SQL。若 SQL 超过 `logging.sql.maxChars`，日志显示前后片段并提示落盘路径，完整 SQL 写入 `logging.sql.dumpDir/{yyyyMMdd}/sql_{requestId}_{jobId_or_pending}_{groupKey}.sql`。
+- **SQL 记录**：提交前会输出实际 SQL。若 SQL 超过 `logging.sql.maxChars`，日志显示前后片段并提示落盘路径，完整 SQL 写入 `logging.sql.dumpDir/{yyyyMMdd}/sql_{requestId}_{context}_{groupKey}.sql`。
 - **日志**：每行包含时间戳与级别，且显示 requestId、jobId、耗时等关键信息；取消/中断会明确标记为“Cancelled by user”或“Polling interrupted by stop()”。
 
 ## 排障建议
