@@ -19,6 +19,6 @@ public final class JsonUtil {
         String prefix = value.substring(0, head);
         String suffix = value.substring(value.length() - tail);
         int truncated = value.length() - head - tail;
-        return prefix + "...(truncated " + truncated + " chars)..." + suffix;
+        return prefix + "...(已截断 " + truncated + " 个字符)..." + suffix;
     }
 }

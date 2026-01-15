@@ -12,6 +12,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -24,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TransferJob implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(TransferJob.class);
+    private static final DateTimeFormatter LOG_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private final AppConfig config;
     private final SourceClient sourceClient;
     private final AsyncSqlClient asyncSqlClient;
@@ -51,6 +53,7 @@ public class TransferJob implements Runnable {
     @Override
     public void run() {
         Instant start = Instant.now();
+        String startTimeText = LocalDateTime.now().format(LOG_TIME_FORMATTER);
         String requestId = UUID.randomUUID().toString();
         String runId = UUID.randomUUID().toString();
         String lockName = resolveLockName();
@@ -59,130 +62,167 @@ public class TransferJob implements Runnable {
         Map<GroupKey, Integer> expectedByKey = null;
         List<GroupKey> keys = null;
         boolean lockHeld = false;
+        boolean startLogged = false;
+        boolean lockResult = false;
+        int totalExpected = 0;
+        int totalGroups = 0;
+        int batchSize = Math.max(1, config.getBatchSize());
+        int insertedRows = 0;
+        int retryCount = 0;
+        String auditSummary = "未执行";
+        String finalStatus = "FAILED";
         LeaseState leaseState = new LeaseState(Instant.EPOCH);
 
         try {
             if (!validateCrypto()) {
-                updateStage("Failed");
+                updateStage("失败");
                 return;
             }
 
-            updateStage("Locking");
-            executeStatement(sqlBuilder.buildCreateLockTableSql(), "create_lock_table", runId, requestId, stats,
+            updateStage("锁定中");
+            executeStatement(sqlBuilder.buildCreateLockTableSql(), "创建锁表", runId, requestId, stats,
                     null, 1, 1);
             lockHeld = acquireLock(lockName, ownerId, requestId, stats, runId);
+            lockResult = lockHeld;
             if (!lockHeld) {
-                updateStage("Skipped");
-                updateProgress(100, "Skipped due to lock");
+                updateStage("已跳过");
+                updateProgress(100, "因锁占用跳过");
+                logStartSeparator(runId, startTimeText, totalGroups, totalExpected, batchSize, lockResult);
+                startLogged = true;
+                finalStatus = "SKIPPED_LOCK";
                 return;
             }
             leaseState.renewedAt = Instant.now();
 
-            updateStage("Fetching");
-            uiLog.log("INFO", "Run start: acquiring source data. runId=" + runId + ", requestId=" + requestId);
+            updateStage("获取中");
+            uiLog.log("INFO", "开始拉取源数据。运行ID=" + runId + "，请求ID=" + requestId);
             List<SourceRecord> records = sourceClient.fetch(config, uiLog);
-            stats.setTotalRecords(records.size());
+            totalExpected = records.size();
+            stats.setTotalRecords(totalExpected);
             progressListener.updateStats(stats);
             if (records.isEmpty()) {
-                uiLog.log("INFO", "0 records fetched, no write needed. runId=" + runId + ", requestId=" + requestId);
-                updateStage("Done");
+                logStartSeparator(runId, startTimeText, 0, 0, batchSize, lockResult);
+                startLogged = true;
+                uiLog.log("INFO", "本次拉取记录数为 0，无需写入。运行ID=" + runId + "，请求ID=" + requestId);
+                updateStage("完成");
+                finalStatus = "SUCCESS";
+                auditSummary = "无数据";
                 return;
             }
             if (cancelled.get()) {
-                uiLog.log("WARN", "Job cancelled after fetch. runId=" + runId + ", requestId=" + requestId);
-                updateStage("Cancelled");
+                logStartSeparator(runId, startTimeText, 0, totalExpected, batchSize, lockResult);
+                startLogged = true;
+                uiLog.log("WARN", "拉取后任务被取消。运行ID=" + runId + "，请求ID=" + requestId);
+                updateStage("已取消");
                 return;
             }
 
-            updateStage("Grouping");
+            updateStage("分组中");
             Map<GroupKey, List<SourceRecord>> grouped = groupRecords(records);
             expectedByKey = expectedCounts(grouped);
             keys = new ArrayList<>(grouped.keySet());
-            stats.setTotalGroups(grouped.size());
+            totalGroups = grouped.size();
+            stats.setTotalGroups(totalGroups);
             progressListener.updateStats(stats);
+            logStartSeparator(runId, startTimeText, totalGroups, totalExpected, batchSize, lockResult);
+            startLogged = true;
 
-            int totalExpected = records.size();
             int distinctOrderItemIds = countDistinctOrderItemIds(records);
-            uiLog.log("INFO", "Fetched records=" + totalExpected
-                    + ", groups=" + grouped.size()
-                    + ", expectedByKey=" + expectedByKey
-                    + ", distinctOrderItemIds=" + distinctOrderItemIds
-                    + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "已拉取记录=" + totalExpected
+                    + "，分组数=" + grouped.size()
+                    + "，预期分组明细=" + expectedByKey
+                    + "，order_item_id 去重数=" + distinctOrderItemIds
+                    + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
 
-            updateStage("Preparing");
-            executeStatement(sqlBuilder.buildCreateStagingTableSql(), "create_staging_table", runId, requestId, stats,
+            updateStage("准备中");
+            executeStatement(sqlBuilder.buildCreateStagingTableSql(), "创建临时表", runId, requestId, stats,
                     null, 1, 1);
-            executeStatement(sqlBuilder.buildCreateStagingIndexSql(), "create_staging_index", runId, requestId, stats,
+            executeStatement(sqlBuilder.buildCreateStagingIndexSql(), "创建临时表索引", runId, requestId, stats,
                     null, 1, 1);
 
             int maxRetries = Math.max(1, config.getJobMaxRetries());
             boolean success = false;
             for (int attempt = 1; attempt <= maxRetries; attempt++) {
+                retryCount = Math.max(0, attempt - 1);
                 if (cancelled.get()) {
-                    throw new InterruptedException("Job cancelled before attempt " + attempt);
+                    throw new InterruptedException("任务在第 " + attempt + " 次尝试前被取消");
                 }
-                uiLog.log("INFO", "Attempt " + attempt + "/" + maxRetries + " started. runId=" + runId
-                        + ", requestId=" + requestId);
+                uiLog.log("INFO", "开始第 " + attempt + "/" + maxRetries + " 次尝试。运行ID=" + runId
+                        + "，请求ID=" + requestId);
                 try {
-                    success = runAttempt(records, keys, expectedByKey, totalExpected, distinctOrderItemIds, runId,
-                            requestId, stats, lockName, ownerId, leaseState);
+                    AuditResult attemptResult = runAttempt(records, keys, expectedByKey, totalExpected,
+                            distinctOrderItemIds, runId, requestId, stats, lockName, ownerId, leaseState);
+                    success = attemptResult.success();
+                    auditSummary = attemptResult.message();
                 } catch (Exception ex) {
-                    uiLog.log("ERROR", "Attempt " + attempt + " failed: " + ex.getMessage() + ", runId=" + runId
-                            + ", requestId=" + requestId);
-                    LOGGER.error("Attempt {} failed", attempt, ex);
-                    cleanupScope(keys, runId, requestId, stats, "attempt_failure");
+                    uiLog.log("ERROR", "第 " + attempt + " 次尝试失败：" + ex.getMessage() + "，运行ID=" + runId
+                            + "，请求ID=" + requestId);
+                    LOGGER.error("第 {} 次尝试失败", attempt, ex);
+                    cleanupScope(keys, runId, requestId, stats, "尝试失败");
                     success = false;
+                    auditSummary = "异常：" + ex.getMessage();
                 }
                 if (success) {
                     break;
                 }
                 if (attempt < maxRetries) {
-                    uiLog.log("WARN", "Audit failed; retrying after cleanup. attempt=" + attempt + ", runId=" + runId
-                            + ", requestId=" + requestId);
+                    uiLog.log("WARN", "稽核失败，清理后重试。尝试=" + attempt + "，运行ID=" + runId
+                            + "，请求ID=" + requestId);
                 }
             }
 
             if (!success) {
-                uiLog.log("ERROR", "Job failed after max retries. cleanup executed. runId=" + runId
-                        + ", requestId=" + requestId);
-                updateStage("Failed");
+                uiLog.log("ERROR", "任务在达到最大重试次数后失败，已完成清理。运行ID=" + runId
+                        + "，请求ID=" + requestId);
+                updateStage("失败");
+                finalStatus = "FAILED";
                 return;
             }
 
-            updateStage("Done");
+            updateStage("完成");
             Duration duration = Duration.between(start, Instant.now());
-            uiLog.log("INFO", "Job completed successfully in " + duration.toMillis() + " ms, runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "任务成功完成，耗时 " + duration.toMillis() + " ms，运行ID=" + runId
+                    + "，请求ID=" + requestId);
+            finalStatus = "SUCCESS";
+            insertedRows = totalExpected;
         } catch (InterruptedException ex) {
-            updateStage("Cancelled");
-            uiLog.log("WARN", "Job cancelled: " + ex.getMessage() + ", runId=" + runId + ", requestId=" + requestId);
+            updateStage("已取消");
+            uiLog.log("WARN", "任务取消：" + ex.getMessage() + "，运行ID=" + runId + "，请求ID=" + requestId);
+            finalStatus = "FAILED";
         } catch (Exception ex) {
-            updateStage("Failed");
-            uiLog.log("ERROR", "Job failed: " + ex.getMessage() + ", runId=" + runId + ", requestId=" + requestId);
-            LOGGER.error("Job failed", ex);
+            updateStage("失败");
+            uiLog.log("ERROR", "任务失败：" + ex.getMessage() + "，运行ID=" + runId + "，请求ID=" + requestId);
+            LOGGER.error("任务失败", ex);
+            finalStatus = "FAILED";
         } finally {
             if (lockHeld) {
                 releaseLock(lockName, ownerId, runId, requestId, stats);
             }
+            if (!startLogged) {
+                logStartSeparator(runId, startTimeText, totalGroups, totalExpected, batchSize, lockResult);
+            }
+            String endTimeText = LocalDateTime.now().format(LOG_TIME_FORMATTER);
+            Duration duration = Duration.between(start, Instant.now());
+            logEndSeparator(runId, endTimeText, duration, finalStatus, insertedRows, auditSummary, retryCount);
         }
     }
 
 
-    private boolean runAttempt(List<SourceRecord> records,
-                               List<GroupKey> keys,
-                               Map<GroupKey, Integer> expectedByKey,
-                               int totalExpected,
-                               int distinctOrderItemIds,
-                               String runId,
-                               String requestId,
-                               TransferStats stats,
-                               String lockName,
-                               String ownerId,
-                               LeaseState leaseState) throws Exception {
-        updateStage("Staging");
+    private AuditResult runAttempt(List<SourceRecord> records,
+                                   List<GroupKey> keys,
+                                   Map<GroupKey, Integer> expectedByKey,
+                                   int totalExpected,
+                                   int distinctOrderItemIds,
+                                   String runId,
+                                   String requestId,
+                                   TransferStats stats,
+                                   String lockName,
+                                   String ownerId,
+                                   LeaseState leaseState) throws Exception {
+        updateStage("分段写入中");
         leaseState.renewedAt = maybeRenewLease(lockName, ownerId, leaseState.renewedAt, runId, requestId, stats);
-        executeStatement(sqlBuilder.buildClearStagingSql(runId), "cleanup_staging", runId, requestId, stats,
+        executeStatement(sqlBuilder.buildClearStagingSql(runId), "清理临时表", runId, requestId, stats,
                 null, 1, 1);
         int batchSize = Math.max(1, config.getBatchSize());
         List<String> segments = sqlBuilder.buildInsertStagingSqlSegments(records, runId, batchSize, uiLog);
@@ -193,44 +233,44 @@ public class TransferJob implements Runnable {
 
         for (int i = 0; i < segments.size(); i++) {
             if (cancelled.get()) {
-                throw new InterruptedException("Job cancelled before staging segment submit");
+                throw new InterruptedException("分段写入提交前任务已取消");
             }
             int segmentIndex = i + 1;
             stats.setCurrentBatch(segmentIndex);
             progressListener.updateStats(stats);
             int segmentRows = Math.min(batchSize, records.size() - (segmentIndex - 1) * batchSize);
-            uiLog.log("INFO", "Staging segment " + segmentIndex + "/" + totalSegments
-                    + ", rows=" + segmentRows
-                    + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "分段写入 " + segmentIndex + "/" + totalSegments
+                    + "，行数=" + segmentRows
+                    + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
             leaseState.renewedAt = maybeRenewLease(lockName, ownerId, leaseState.renewedAt, runId, requestId, stats);
-            executeStatement(segments.get(i), "staging_segment_" + segmentIndex, runId, requestId, stats,
+            executeStatement(segments.get(i), "分段写入_" + segmentIndex, runId, requestId, stats,
                     null, segmentRows, totalSegments);
             updateProgress(segmentIndex, totalSegments);
         }
 
-        updateStage("Applying");
-        uiLog.log("INFO", "Applying staged data to target. runId=" + runId
-                + ", keys=" + keys + ", requestId=" + requestId);
+        updateStage("应用中");
+        uiLog.log("INFO", "正在将临时表数据应用到目标表。运行ID=" + runId
+                + "，分组键=" + keys + "，请求ID=" + requestId);
         leaseState.renewedAt = maybeRenewLease(lockName, ownerId, leaseState.renewedAt, runId, requestId, stats);
-        executeStatement(sqlBuilder.buildApplyFromStagingSql(keys, runId, uiLog), "apply_to_target", runId, requestId,
+        executeStatement(sqlBuilder.buildApplyFromStagingSql(keys, runId, uiLog), "应用到目标表", runId, requestId,
                 stats, null, records.size(), 1);
 
-        updateStage("Auditing");
+        updateStage("稽核中");
         leaseState.renewedAt = maybeRenewLease(lockName, ownerId, leaseState.renewedAt, runId, requestId, stats);
         AuditResult auditResult = auditTarget(keys, expectedByKey, totalExpected, distinctOrderItemIds,
                 runId, requestId, stats);
         if (!auditResult.success()) {
-            uiLog.log("WARN", "Audit mismatch detected: " + auditResult.message() + ", runId=" + runId
-                    + ", requestId=" + requestId);
-            cleanupScope(keys, runId, requestId, stats, "audit_failure");
-            return false;
+            uiLog.log("WARN", "稽核不一致：" + auditResult.message() + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
+            cleanupScope(keys, runId, requestId, stats, "稽核失败");
+            return auditResult;
         }
 
-        executeStatement(sqlBuilder.buildClearStagingSql(runId), "cleanup_staging_success", runId, requestId, stats,
+        executeStatement(sqlBuilder.buildClearStagingSql(runId), "清理临时表_成功", runId, requestId, stats,
                 null, 1, 1);
-        uiLog.log("INFO", "Audit passed. runId=" + runId + ", requestId=" + requestId);
-        return true;
+        uiLog.log("INFO", "稽核通过。运行ID=" + runId + "，请求ID=" + requestId);
+        return auditResult;
     }
 
     private AuditResult auditTarget(List<GroupKey> keys,
@@ -241,10 +281,10 @@ public class TransferJob implements Runnable {
                                     String requestId,
                                     TransferStats stats) throws Exception {
         AsyncSqlClient.ResultResponse groupResult = executeQuery(sqlBuilder.buildAuditByGroupSql(keys, uiLog),
-                "audit_by_group", runId, requestId, stats, null, 1, 1);
+                "分组稽核", runId, requestId, stats, null, 1, 1);
         List<List<String>> rows = groupResult.getRows();
         if (rows == null) {
-            throw new IllegalStateException("Audit result parsing failed for group query. rawJson="
+            throw new IllegalStateException("分组稽核结果解析失败。原始JSON="
                     + safeString(groupResult.getRawJson()));
         }
         Map<GroupKey, AuditCounts> actualByKey = new LinkedHashMap<>();
@@ -260,10 +300,10 @@ public class TransferJob implements Runnable {
         }
 
         AsyncSqlClient.ResultResponse totalsResult = executeQuery(sqlBuilder.buildAuditTotalsSql(keys, uiLog),
-                "audit_totals", runId, requestId, stats, null, 1, 1);
+                "汇总稽核", runId, requestId, stats, null, 1, 1);
         List<List<String>> totalRows = totalsResult.getRows();
         if (totalRows == null || totalRows.isEmpty()) {
-            throw new IllegalStateException("Audit totals parsing failed. rawJson="
+            throw new IllegalStateException("汇总稽核结果解析失败。原始JSON="
                     + safeString(totalsResult.getRawJson()));
         }
         int totalDistinctActual = parseInt(getCell(totalRows.get(0), 1));
@@ -274,36 +314,36 @@ public class TransferJob implements Runnable {
             int expected = entry.getValue();
             AuditCounts actual = actualByKey.get(key);
             if (actual == null) {
-                diffs.add(key + " expected=" + expected + " actual=0");
+                diffs.add(key + " 预期=" + expected + " 实际=0");
                 continue;
             }
             if (actual.count() != expected) {
-                diffs.add(key + " expected=" + expected + " actual=" + actual.count());
+                diffs.add(key + " 预期=" + expected + " 实际=" + actual.count());
             }
         }
         for (GroupKey actualKey : actualByKey.keySet()) {
             if (!expectedByKey.containsKey(actualKey)) {
-                diffs.add(actualKey + " unexpected_in_target");
+                diffs.add(actualKey + " 在目标表中出现但不在预期范围内");
             }
         }
         if (totalActual != totalExpected) {
-            diffs.add("total_expected=" + totalExpected + " total_actual=" + totalActual);
+            diffs.add("总数预期=" + totalExpected + " 总数实际=" + totalActual);
         }
         if (totalDistinctActual != distinctExpected) {
-            diffs.add("distinct_expected=" + distinctExpected + " distinct_actual=" + totalDistinctActual);
+            diffs.add("去重预期=" + distinctExpected + " 去重实际=" + totalDistinctActual);
         }
 
         if (!diffs.isEmpty()) {
             String message = String.join("; ", diffs);
-            uiLog.log("WARN", "Audit differences: " + message + ", runId=" + runId + ", requestId=" + requestId);
+            uiLog.log("WARN", "稽核差异：" + message + "，运行ID=" + runId + "，请求ID=" + requestId);
             return new AuditResult(false, message);
         }
-        return new AuditResult(true, "OK");
+        return new AuditResult(true, "通过");
     }
 
     private boolean validateCrypto() {
         if (config.getAesKey().isBlank() || config.getAesIv().isBlank()) {
-            uiLog.log("ERROR", "AES key/IV missing. Please configure crypto.aesKey and crypto.aesIv.");
+            uiLog.log("ERROR", "AES Key/IV 缺失，请配置 crypto.aesKey 与 crypto.aesIv。");
             return false;
         }
         return true;
@@ -341,18 +381,18 @@ public class TransferJob implements Runnable {
             throws Exception {
         int leaseSeconds = Math.max(30, config.getLockLeaseSeconds());
         SqlExecution execution = executeStatement(sqlBuilder.buildLockAcquireSql(lockName, ownerId, leaseSeconds),
-                "lock_acquire", runId, requestId, stats, null, 1, 1);
-        Integer rowsAffected = resolveRowsAffected(execution, requestId, "lock_acquire");
+                "获取锁", runId, requestId, stats, null, 1, 1);
+        Integer rowsAffected = resolveRowsAffected(execution, requestId, "获取锁");
         if (rowsAffected == null) {
-            throw new IllegalStateException("Unable to determine lock acquisition result.");
+            throw new IllegalStateException("无法确定锁获取结果。");
         }
         if (rowsAffected == 0) {
-            uiLog.log("INFO", "Another instance is running; skipping run. lockName=" + lockName + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "已有其他实例在运行，跳过本次执行。锁名称=" + lockName + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
             return false;
         }
-        uiLog.log("INFO", "Lock acquired. lockName=" + lockName + ", ownerId=" + ownerId + ", runId=" + runId
-                + ", requestId=" + requestId);
+        uiLog.log("INFO", "锁获取成功。锁名称=" + lockName + "，持有者=" + ownerId + "，运行ID=" + runId
+                + "，请求ID=" + requestId);
         return true;
     }
 
@@ -368,26 +408,26 @@ public class TransferJob implements Runnable {
             return lastRenewedAt;
         }
         SqlExecution execution = executeStatement(sqlBuilder.buildLockAcquireSql(lockName, ownerId, leaseSeconds),
-                "lock_renew", runId, requestId, stats, null, 1, 1);
-        Integer rowsAffected = resolveRowsAffected(execution, requestId, "lock_renew");
+                "续期锁", runId, requestId, stats, null, 1, 1);
+        Integer rowsAffected = resolveRowsAffected(execution, requestId, "续期锁");
         if (rowsAffected == null || rowsAffected == 0) {
-            throw new IllegalStateException("Failed to renew lock lease; another instance may have taken over.");
+            throw new IllegalStateException("锁租约续期失败，可能已被其他实例接管。");
         }
-        uiLog.log("INFO", "Lock renewed. lockName=" + lockName + ", ownerId=" + ownerId + ", runId=" + runId
-                + ", requestId=" + requestId);
+        uiLog.log("INFO", "锁续期成功。锁名称=" + lockName + "，持有者=" + ownerId + "，运行ID=" + runId
+                + "，请求ID=" + requestId);
         return now;
     }
 
     private void releaseLock(String lockName, String ownerId, String runId, String requestId, TransferStats stats) {
         try {
-            executeStatement(sqlBuilder.buildLockReleaseSql(lockName, ownerId), "lock_release", runId, requestId, stats,
+            executeStatement(sqlBuilder.buildLockReleaseSql(lockName, ownerId), "释放锁", runId, requestId, stats,
                     null, 1, 1);
-            uiLog.log("INFO", "Lock released. lockName=" + lockName + ", ownerId=" + ownerId + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "锁已释放。锁名称=" + lockName + "，持有者=" + ownerId + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
         } catch (Exception ex) {
-            uiLog.log("WARN", "Failed to release lock: " + ex.getMessage() + ", lockName=" + lockName
-                    + ", runId=" + runId + ", requestId=" + requestId);
-            LOGGER.warn("Failed to release lock", ex);
+            uiLog.log("WARN", "释放锁失败：" + ex.getMessage() + "，锁名称=" + lockName
+                    + "，运行ID=" + runId + "，请求ID=" + requestId);
+            LOGGER.warn("释放锁失败", ex);
         }
     }
 
@@ -396,17 +436,17 @@ public class TransferJob implements Runnable {
             return;
         }
         try {
-            updateStage("Cleaning");
-            uiLog.log("INFO", "Cleanup scope: reason=" + reason + ", keys=" + keys + ", runId=" + runId
-                    + ", requestId=" + requestId);
-            executeStatement(sqlBuilder.buildDeleteTargetByKeysSql(keys, uiLog), "cleanup_target", runId, requestId,
+            updateStage("清理中");
+            uiLog.log("INFO", "开始清理范围：原因=" + reason + "，分组键=" + keys + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
+            executeStatement(sqlBuilder.buildDeleteTargetByKeysSql(keys, uiLog), "清理目标表", runId, requestId,
                     stats, null, 1, 1);
-            executeStatement(sqlBuilder.buildClearStagingSql(runId), "cleanup_staging", runId, requestId, stats,
+            executeStatement(sqlBuilder.buildClearStagingSql(runId), "清理临时表", runId, requestId, stats,
                     null, 1, 1);
         } catch (Exception ex) {
-            uiLog.log("ERROR", "Cleanup failed: " + ex.getMessage() + ", runId=" + runId
-                    + ", requestId=" + requestId);
-            LOGGER.error("Cleanup failed", ex);
+            uiLog.log("ERROR", "清理失败：" + ex.getMessage() + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
+            LOGGER.error("清理失败", ex);
         }
     }
 
@@ -442,25 +482,25 @@ public class TransferJob implements Runnable {
                                     int totalSegments,
                                     boolean fetchResult) throws Exception {
         if (cancelled.get()) {
-            throw new InterruptedException("Job cancelled before SQL execution: " + context);
+            throw new InterruptedException("SQL 执行前任务已取消：" + context);
         }
-        updateStage("Encrypting");
+        updateStage("加密中");
         logPlainSql(sql, runId, requestId, key, context, records, totalSegments);
         String encryptedSql = encryptSql(sql);
 
-        updateStage("Submitting");
+        updateStage("提交中");
         AsyncSqlClient.SubmitResponse submitResponse = asyncSqlClient.submit(config, encryptedSql, uiLog, requestId);
         String jobId = submitResponse.getJobId();
         stats.setJobId(jobId);
         progressListener.updateStats(stats);
-        uiLog.log("INFO", "Submitted SQL: context=" + context + ", jobId=" + jobId + ", status="
-                + submitResponse.getStatus() + ", runId=" + runId + ", requestId=" + requestId);
+        uiLog.log("INFO", "已提交 SQL：上下文=" + context + "，作业ID=" + jobId + "，状态="
+                + submitResponse.getStatus() + "，运行ID=" + runId + "，请求ID=" + requestId);
 
-        updateStage("Polling");
+        updateStage("轮询中");
         AsyncSqlClient.StatusResponse status = asyncSqlClient.pollStatus(
                 config, jobId, uiLog, progressListener, cancelled, requestId);
         if (handleTerminalStatus(status, jobId, requestId, context)) {
-            throw new IllegalStateException(context + " failed with status=" + status.getStatus());
+            throw new IllegalStateException(context + " 执行失败，状态=" + status.getStatus());
         }
 
         AsyncSqlClient.ResultResponse result = null;
@@ -489,8 +529,8 @@ public class TransferJob implements Runnable {
             AsyncSqlClient.ResultResponse fetched = asyncSqlClient.result(config, execution.jobId, uiLog, requestId);
             return firstNonNull(fetched.getRowsAffected(), fetched.getActualRows());
         } catch (Exception ex) {
-            uiLog.log("WARN", "Unable to resolve rowsAffected for " + context + ": " + ex.getMessage()
-                    + ", requestId=" + requestId);
+            uiLog.log("WARN", "无法获取影响行数：" + context + "，原因=" + ex.getMessage()
+                    + "，请求ID=" + requestId);
             return null;
         }
     }
@@ -500,27 +540,27 @@ public class TransferJob implements Runnable {
                                          String requestId,
                                          String context) {
         if ("CANCELLED_LOCAL".equalsIgnoreCase(status.getStatus())) {
-            uiLog.log("WARN", context + " cancelled during polling. jobId=" + jobId + ", requestId=" + requestId
-                    + ", reason=" + status.getErrorMessage());
-            updateStage("Cancelled");
+            uiLog.log("WARN", context + " 轮询中被取消。作业ID=" + jobId + "，请求ID=" + requestId
+                    + "，原因=" + status.getErrorMessage());
+            updateStage("已取消");
             return true;
         }
         if ("TIMEOUT".equalsIgnoreCase(status.getStatus())) {
-            uiLog.log("ERROR", context + " polling timeout. jobId=" + jobId
-                    + ", errorMessage=" + status.getErrorMessage()
-                    + ", requestId=" + requestId);
-            updateStage("Failed");
+            uiLog.log("ERROR", context + " 轮询超时。作业ID=" + jobId
+                    + "，错误信息=" + status.getErrorMessage()
+                    + "，请求ID=" + requestId);
+            updateStage("失败");
             return true;
         }
         if (!"SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
-            uiLog.log("ERROR", context + " failed. jobId=" + jobId
-                    + ", status=" + status.getStatus()
-                    + ", errorMessage=" + safeString(status.getErrorMessage())
-                    + ", errorPosition=" + safeString(status.getErrorPosition())
-                    + ", sqlState=" + safeString(status.getSqlState())
-                    + ", traceId=" + safeString(status.getTraceId())
-                    + ", requestId=" + requestId);
-            updateStage("Failed");
+            uiLog.log("ERROR", context + " 执行失败。作业ID=" + jobId
+                    + "，状态=" + status.getStatus()
+                    + "，错误信息=" + safeString(status.getErrorMessage())
+                    + "，错误位置=" + safeString(status.getErrorPosition())
+                    + "，SQLState=" + safeString(status.getSqlState())
+                    + "，TraceId=" + safeString(status.getTraceId())
+                    + "，请求ID=" + requestId);
+            updateStage("失败");
             return true;
         }
         return false;
@@ -537,21 +577,21 @@ public class TransferJob implements Runnable {
                 || status.getAffectedRows() != null
                 || status.getActualRows() != null;
         if (!hasRowsSummary && result != null) {
-            uiLog.log("INFO", "Job succeeded. context=" + context + ", jobId=" + jobId
-                    + ", rowsAffected=" + result.getRowsAffected()
-                    + ", actualRows=" + result.getActualRows()
-                    + ", columns=" + result.getColumnsCount()
-                    + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "作业成功。上下文=" + context + "，作业ID=" + jobId
+                    + "，影响行数=" + result.getRowsAffected()
+                    + "，实际行数=" + result.getActualRows()
+                    + "，列数=" + result.getColumnsCount()
+                    + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
         } else {
-            uiLog.log("INFO", "Job succeeded. context=" + context + ", jobId=" + jobId
-                    + ", rowsAffected=" + status.getRowsAffected()
-                    + ", updatedRows=" + status.getUpdatedRows()
-                    + ", affectedRows=" + status.getAffectedRows()
-                    + ", actualRows=" + status.getActualRows()
-                    + ", elapsed=" + status.getElapsedMillis()
-                    + ", runId=" + runId
-                    + ", requestId=" + requestId);
+            uiLog.log("INFO", "作业成功。上下文=" + context + "，作业ID=" + jobId
+                    + "，影响行数=" + status.getRowsAffected()
+                    + "，更新行数=" + status.getUpdatedRows()
+                    + "，受影响行数=" + status.getAffectedRows()
+                    + "，实际行数=" + status.getActualRows()
+                    + "，耗时=" + status.getElapsedMillis()
+                    + "，运行ID=" + runId
+                    + "，请求ID=" + requestId);
         }
     }
 
@@ -569,34 +609,34 @@ public class TransferJob implements Runnable {
                              int records,
                              int totalSegments) {
         String targetTable = sqlBuilder.getTargetTable();
-        String keyText = key == null ? "(all)" : key.toString();
-        uiLog.log("INFO", "Prepared SQL for submit. runId=" + runId
-                + ", requestId=" + requestId
-                + ", context=" + contextTag
-                + ", groupKey=" + keyText
-                + ", records=" + records
-                + ", segments=" + totalSegments
-                + ", dbUser=" + config.getAsyncDbUser()
-                + ", targetTable=" + targetTable);
+        String keyText = key == null ? "(全部)" : key.toString();
+        uiLog.log("INFO", "SQL 已准备提交。运行ID=" + runId
+                + "，请求ID=" + requestId
+                + "，上下文=" + contextTag
+                + "，分组键=" + keyText
+                + "，记录数=" + records
+                + "，分段数=" + totalSegments
+                + "，数据库用户=" + config.getAsyncDbUser()
+                + "，目标表=" + targetTable);
         int maxChars = config.getLoggingSqlMaxChars();
         if (sql.length() > maxChars) {
             int snippet = Math.min(8000, Math.max(1, maxChars / 2));
             String head = sql.substring(0, Math.min(snippet, sql.length()));
             String tail = sql.substring(Math.max(0, sql.length() - snippet));
             Path filePath = buildSqlDumpPath(requestId, contextTag, key);
-            uiLog.log("INFO", "SQL preview (truncated). Full SQL will be saved to " + filePath
-                    + ". Preview=" + head + "...(truncated " + (sql.length() - (head.length() + tail.length()))
-                    + " chars)..." + tail);
+            uiLog.log("INFO", "SQL 预览（已截断）。完整 SQL 将保存到 " + filePath
+                    + "。预览=" + head + "...(已截断 " + (sql.length() - (head.length() + tail.length()))
+                    + " 个字符)..." + tail);
             writeSqlDump(filePath, sql);
         } else {
-            uiLog.log("INFO", "SQL prepared: " + sql);
+            uiLog.log("INFO", "SQL 内容：" + sql);
         }
     }
 
     private Path buildSqlDumpPath(String requestId, String contextTag, GroupKey key) {
         String date = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
         String dumpDir = config.getLoggingSqlDumpDir();
-        String safeGroup = key == null ? "all" : sanitizeFilePart(key.getDateNo() + "_" + key.getDatetime());
+        String safeGroup = key == null ? "全部" : sanitizeFilePart(key.getDateNo() + "_" + key.getDatetime());
         String safeRequest = sanitizeFilePart(requestId);
         String safeContext = sanitizeFilePart(contextTag);
         return Paths.get(dumpDir, date, "sql_" + safeRequest + "_" + safeContext + "_" + safeGroup + ".sql");
@@ -607,16 +647,16 @@ public class TransferJob implements Runnable {
             Files.createDirectories(path.getParent());
             Files.writeString(path, sql, StandardCharsets.UTF_8);
         } catch (IOException ex) {
-            uiLog.log("WARN", "Failed to dump SQL to " + path + ": " + ex.getMessage());
-            LOGGER.warn("Failed to dump SQL to {}", path, ex);
+            uiLog.log("WARN", "SQL 落盘失败：" + path + "，原因=" + ex.getMessage());
+            LOGGER.warn("SQL 落盘失败: {}", path, ex);
         }
     }
 
     private String sanitizeFilePart(String value) {
         if (value == null || value.isBlank()) {
-            return "unknown";
+            return "未知";
         }
-        return value.replaceAll("[^a-zA-Z0-9._-]", "_");
+        return value.replaceAll("[^\\p{L}\\p{N}._-]", "_");
     }
 
     private void updateStage(String stage) {
@@ -625,11 +665,54 @@ public class TransferJob implements Runnable {
 
     private void updateProgress(int currentSegment, int totalSegments) {
         int percent = totalSegments == 0 ? 100 : (int) Math.round((currentSegment * 100.0) / totalSegments);
-        progressListener.updateProgress(percent, "Segment " + currentSegment + "/" + totalSegments);
+        progressListener.updateProgress(percent, "分段 " + currentSegment + "/" + totalSegments);
     }
 
     private void updateProgress(int percent, String message) {
         progressListener.updateProgress(percent, message);
+    }
+
+    private void logStartSeparator(String runId,
+                                   String startTime,
+                                   int expectedGroups,
+                                   int recordCount,
+                                   int batchSize,
+                                   boolean lockAcquired) {
+        String title = "====================【传输任务开始】====================";
+        String detail = "运行ID=" + runId
+                + "，开始时间=" + startTime
+                + "，预期分组数=" + expectedGroups
+                + "，记录数=" + recordCount
+                + "，分段大小=" + batchSize
+                + "，分布式锁=" + (lockAcquired ? "成功" : "失败");
+        logSeparatorBlock(title, detail);
+    }
+
+    private void logEndSeparator(String runId,
+                                 String endTime,
+                                 Duration duration,
+                                 String status,
+                                 int insertedRows,
+                                 String auditSummary,
+                                 int retryCount) {
+        String title = "====================【传输任务结束】====================";
+        String detail = "运行ID=" + runId
+                + "，结束时间=" + endTime
+                + "，耗时=" + duration.toMillis() + " ms"
+                + "，最终状态=" + status
+                + "，插入行数=" + insertedRows
+                + "，稽核摘要=" + (auditSummary == null || auditSummary.isBlank() ? "未执行" : auditSummary)
+                + "，重试次数=" + retryCount;
+        logSeparatorBlock(title, detail);
+    }
+
+    private void logSeparatorBlock(String title, String detail) {
+        uiLog.log("INFO", title);
+        uiLog.log("INFO", detail);
+        uiLog.log("INFO", title);
+        LOGGER.info(title);
+        LOGGER.info(detail);
+        LOGGER.info(title);
     }
 
     private String safeString(String value) {
@@ -642,7 +725,7 @@ public class TransferJob implements Runnable {
     }
 
     private String buildOwnerId(String runId) {
-        String hostname = "unknown";
+        String hostname = "未知";
         try {
             hostname = InetAddress.getLocalHost().getHostName();
         } catch (Exception ignored) {

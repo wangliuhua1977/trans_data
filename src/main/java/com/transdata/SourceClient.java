@@ -49,14 +49,14 @@ public class SourceClient {
             JsonNode root = objectMapper.readTree(responseBody);
             int code = root.path("code").asInt(-1);
             if (code != 1) {
-                String message = root.path("message").asText("unknown");
-                uiLog.log("ERROR", "Source responded with code=" + code + ", message=" + message);
-                throw new IllegalStateException("Source returned code " + code + ": " + message);
+                String message = root.path("message").asText("未知");
+                uiLog.log("ERROR", "源接口返回异常：code=" + code + "，message=" + message);
+                throw new IllegalStateException("源接口返回 code " + code + ": " + message);
             }
             JsonNode data = root.path("data");
             if (!data.isArray()) {
-                uiLog.log("ERROR", "Source response missing data array.");
-                throw new IllegalStateException("Source data is not array");
+                uiLog.log("ERROR", "源接口响应缺少 data 数组。");
+                throw new IllegalStateException("源接口 data 不是数组");
             }
             List<SourceRecord> records = new ArrayList<>();
             for (JsonNode node : data) {
@@ -75,7 +75,7 @@ public class SourceClient {
                 record.setAcceptDate(node.path("ACCEPT_DATE").asText("").trim());
                 records.add(record);
             }
-            LOGGER.info("Fetched {} records from source.", records.size());
+            LOGGER.info("已从源接口获取 {} 条记录。", records.size());
             return records;
         }
     }

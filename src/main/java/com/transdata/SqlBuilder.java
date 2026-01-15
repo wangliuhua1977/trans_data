@@ -233,7 +233,7 @@ public class SqlBuilder {
             BigDecimal number = new BigDecimal(value.trim());
             return number.toPlainString();
         } catch (NumberFormatException ex) {
-            String message = "Invalid numeric value for " + field + ": " + value + ", using NULL.";
+            String message = "字段 " + field + " 的数值非法：" + value + "，已使用 NULL。";
             LOGGER.warn(message);
             if (uiLog != null) {
                 uiLog.log("WARN", message);

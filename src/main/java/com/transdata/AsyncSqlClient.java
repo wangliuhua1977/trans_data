@@ -64,12 +64,12 @@ public class AsyncSqlClient {
         submitResponse.setRawJson(responsePayload.rawJson());
         if (uiLog != null) {
             String truncated = JsonUtil.safeTruncate(responsePayload.rawJson(), config.getLoggingSqlMaxChars());
-            uiLog.log("INFO", "Async SQL submit response: jobId=" + submitResponse.getJobId()
-                    + ", status=" + submitResponse.getStatus()
-                    + ", serverTime=" + submitResponse.getServerTime()
-                    + ", executeTime=" + submitResponse.getExecuteTime()
-                    + ", requestId=" + safe(requestId)
-                    + ", rawJson=" + truncated);
+            uiLog.log("INFO", "异步 SQL 提交响应：作业ID=" + submitResponse.getJobId()
+                    + "，状态=" + submitResponse.getStatus()
+                    + "，服务端时间=" + submitResponse.getServerTime()
+                    + "，执行时间=" + submitResponse.getExecuteTime()
+                    + "，请求ID=" + safe(requestId)
+                    + "，原始JSON=" + truncated);
         }
         return submitResponse;
     }
@@ -91,18 +91,18 @@ public class AsyncSqlClient {
             updatePolling(progressListener, status);
             if (lastLoggedStatus == null) {
                 if (uiLog != null) {
-                    uiLog.log("INFO", "Polling started: jobId=" + jobId
-                            + ", initialStatus=" + status.getStatus()
-                            + ", requestId=" + safe(requestId)
-                            + ", startedAt=" + TIME_FORMATTER.format(startedAt));
+                    uiLog.log("INFO", "开始轮询：作业ID=" + jobId
+                            + "，初始状态=" + status.getStatus()
+                            + "，请求ID=" + safe(requestId)
+                            + "，开始时间=" + TIME_FORMATTER.format(startedAt));
                 }
                 lastLoggedStatus = status.getStatus();
             } else if (!equalsIgnoreCase(lastLoggedStatus, status.getStatus())) {
                 if (uiLog != null) {
-                    uiLog.log("INFO", "Polling status changed: jobId=" + jobId
-                            + ", status=" + status.getStatus()
-                            + ", elapsed=" + formatMillis(status.getElapsedMillis())
-                            + ", progress=" + formatProgress(status.getProgressPercent()));
+                    uiLog.log("INFO", "轮询状态变化：作业ID=" + jobId
+                            + "，状态=" + status.getStatus()
+                            + "，耗时=" + formatMillis(status.getElapsedMillis())
+                            + "，进度=" + formatProgress(status.getProgressPercent()));
                 }
                 lastLoggedStatus = status.getStatus();
             }
@@ -114,7 +114,7 @@ public class AsyncSqlClient {
                 StatusResponse timeout = new StatusResponse();
                 timeout.setJobId(jobId);
                 timeout.setStatus("TIMEOUT");
-                timeout.setErrorMessage("Polling exceeded maxWaitSeconds=" + maxWaitSeconds);
+                timeout.setErrorMessage("轮询超过最大等待时间 maxWaitSeconds=" + maxWaitSeconds);
                 timeout.setElapsedMillis(status.getElapsedMillis());
                 logPollingFinished(uiLog, timeout, requestId, config.getLoggingSqlMaxChars());
                 return timeout;
@@ -126,7 +126,7 @@ public class AsyncSqlClient {
                 StatusResponse cancelledResponse = new StatusResponse();
                 cancelledResponse.setJobId(jobId);
                 cancelledResponse.setStatus("CANCELLED_LOCAL");
-                cancelledResponse.setErrorMessage("Polling interrupted by stop()");
+                cancelledResponse.setErrorMessage("轮询被 stop() 中断");
                 cancelledResponse.setElapsedMillis(Duration.between(startedAt, Instant.now()).toMillis());
                 logPollingFinished(uiLog, cancelledResponse, requestId, config.getLoggingSqlMaxChars());
                 return cancelledResponse;
@@ -136,7 +136,7 @@ public class AsyncSqlClient {
         StatusResponse cancelledResponse = new StatusResponse();
         cancelledResponse.setJobId(jobId);
         cancelledResponse.setStatus("CANCELLED_LOCAL");
-        cancelledResponse.setErrorMessage("Cancelled by user");
+        cancelledResponse.setErrorMessage("用户已取消");
         cancelledResponse.setElapsedMillis(Duration.between(startedAt, Instant.now()).toMillis());
         logPollingFinished(uiLog, cancelledResponse, requestId, config.getLoggingSqlMaxChars());
         return cancelledResponse;
@@ -196,12 +196,12 @@ public class AsyncSqlClient {
         resultResponse.setRawJson(responsePayload.rawJson());
         if (uiLog != null) {
             String truncated = JsonUtil.safeTruncate(responsePayload.rawJson(), config.getLoggingSqlMaxChars());
-            uiLog.log("INFO", "Async SQL result response: jobId=" + jobId
-                    + ", rowsAffected=" + valueOrDash(resultResponse.getRowsAffected())
-                    + ", actualRows=" + valueOrDash(resultResponse.getActualRows())
-                    + ", columns=" + valueOrDash(resultResponse.getColumnsCount())
-                    + ", requestId=" + safe(requestId)
-                    + ", rawJson=" + truncated);
+            uiLog.log("INFO", "异步 SQL 结果响应：作业ID=" + jobId
+                    + "，影响行数=" + valueOrDash(resultResponse.getRowsAffected())
+                    + "，实际行数=" + valueOrDash(resultResponse.getActualRows())
+                    + "，列数=" + valueOrDash(resultResponse.getColumnsCount())
+                    + "，请求ID=" + safe(requestId)
+                    + "，原始JSON=" + truncated);
         }
         return resultResponse;
     }
@@ -221,7 +221,7 @@ public class AsyncSqlClient {
 
         try (CloseableHttpResponse response = httpClient.execute(post)) {
             String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
-            LOGGER.info("Async SQL response received from {}", uri.getPath());
+            LOGGER.info("已收到异步 SQL 响应：{}", uri.getPath());
             JsonNode jsonNode = readJson(responseBody);
             return new ResponsePayload(responseBody, jsonNode);
         }
@@ -231,7 +231,7 @@ public class AsyncSqlClient {
         try {
             return objectMapper.readTree(responseBody);
         } catch (Exception ex) {
-            LOGGER.warn("Failed to parse async SQL response JSON: {}", ex.getMessage());
+            LOGGER.warn("解析异步 SQL 响应 JSON 失败: {}", ex.getMessage());
             return objectMapper.createObjectNode();
         }
     }
@@ -247,35 +247,35 @@ public class AsyncSqlClient {
             return;
         }
         StringBuilder builder = new StringBuilder();
-        builder.append("Polling finished: jobId=").append(status.getJobId())
-                .append(", status=").append(status.getStatus())
-                .append(", elapsed=").append(formatMillis(status.getElapsedMillis()));
+        builder.append("轮询结束：作业ID=").append(status.getJobId())
+                .append("，状态=").append(status.getStatus())
+                .append("，耗时=").append(formatMillis(status.getElapsedMillis()));
         if (status.isSucceeded()) {
-            builder.append(", rowsAffected=").append(valueOrDash(status.getRowsAffected()))
-                    .append(", progress=").append(formatProgress(status.getProgressPercent()));
+            builder.append("，影响行数=").append(valueOrDash(status.getRowsAffected()))
+                    .append("，进度=").append(formatProgress(status.getProgressPercent()));
         } else {
             String errorMessage = safeString(status.getErrorMessage());
             String errorPosition = safeString(status.getErrorPosition());
             String sqlState = safeString(status.getSqlState());
             String traceId = safeString(status.getTraceId());
             if (!errorMessage.isBlank()) {
-                builder.append(", errorMessage=").append(errorMessage);
+                builder.append("，errorMessage=").append(errorMessage);
             }
             if (!errorPosition.isBlank()) {
-                builder.append(", errorPosition=").append(errorPosition);
+                builder.append("，errorPosition=").append(errorPosition);
             }
             if (!sqlState.isBlank()) {
-                builder.append(", sqlState=").append(sqlState);
+                builder.append("，sqlState=").append(sqlState);
             }
             if (!traceId.isBlank()) {
-                builder.append(", traceId=").append(traceId);
+                builder.append("，traceId=").append(traceId);
             }
         }
-        builder.append(", requestId=").append(safe(requestId));
+        builder.append("，请求ID=").append(safe(requestId));
         uiLog.log("INFO", builder.toString());
         if (status.getRawJson() != null && !status.getRawJson().isBlank()) {
-            uiLog.log("INFO", "Async SQL status response: jobId=" + status.getJobId()
-                    + ", rawJson=" + JsonUtil.safeTruncate(status.getRawJson(), maxChars));
+            uiLog.log("INFO", "异步 SQL 状态响应：作业ID=" + status.getJobId()
+                    + "，原始JSON=" + JsonUtil.safeTruncate(status.getRawJson(), maxChars));
         }
     }
 

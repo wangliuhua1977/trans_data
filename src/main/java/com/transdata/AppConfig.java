@@ -5,7 +5,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -31,18 +34,21 @@ public class AppConfig {
         Properties properties = new Properties();
         try (InputStream inputStream = AppConfig.class.getResourceAsStream("/config.properties")) {
             if (inputStream != null) {
-                properties.load(inputStream);
+                try (InputStreamReader reader = new InputStreamReader(inputStream, StandardCharsets.UTF_8)) {
+                    properties.load(reader);
+                }
             }
         } catch (IOException ex) {
-            LOGGER.warn("Failed to load default config: {}", ex.getMessage());
+            LOGGER.warn("加载默认配置失败: {}", ex.getMessage());
         }
 
         Path userConfigPath = resolveUserConfigPath();
         if (Files.exists(userConfigPath)) {
-            try (InputStream inputStream = Files.newInputStream(userConfigPath)) {
-                properties.load(inputStream);
+            try (InputStream inputStream = Files.newInputStream(userConfigPath);
+                 InputStreamReader reader = new InputStreamReader(inputStream, StandardCharsets.UTF_8)) {
+                properties.load(reader);
             } catch (IOException ex) {
-                LOGGER.warn("Failed to load user config: {}", ex.getMessage());
+                LOGGER.warn("加载用户配置失败: {}", ex.getMessage());
             }
         }
 
@@ -58,11 +64,12 @@ public class AppConfig {
     public synchronized void save() {
         try {
             Files.createDirectories(userConfigPath.getParent());
-            try (OutputStream outputStream = Files.newOutputStream(userConfigPath)) {
-                properties.store(outputStream, "trans_data user configuration");
+            try (OutputStream outputStream = Files.newOutputStream(userConfigPath);
+                 OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
+                properties.store(writer, "trans_data 用户配置");
             }
         } catch (IOException ex) {
-            LOGGER.warn("Failed to save user config: {}", ex.getMessage());
+            LOGGER.warn("保存用户配置失败: {}", ex.getMessage());
         }
     }
 
@@ -203,7 +210,7 @@ public class AppConfig {
     }
 
     public synchronized int getBatchSize() {
-        return getInt("schedule.batchSize", 500);
+        return getInt("schedule.batchSize", 100);
     }
 
     public synchronized void setBatchSize(int batchSize) {
