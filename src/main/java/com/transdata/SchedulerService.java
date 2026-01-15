@@ -69,10 +69,10 @@ public class SchedulerService {
     }
 
     public synchronized void triggerOnce() {
-        triggerOnceSafely();
+        triggerOnceSafely(false);
     }
 
-    private void triggerOnceSafely() {
+    private void triggerOnceSafely(boolean waitForCompletion) {
         if (cancelled.get()) {
             return;
         }
@@ -89,11 +89,14 @@ public class SchedulerService {
             return;
         }
         runningFuture = worker.submit(jobFactory.create(cancelled));
+        if (waitForCompletion) {
+            waitForJobCompletion();
+        }
     }
 
     private void scheduleWithInterval() {
         long interval = Math.max(1, config.getIntervalSeconds());
-        scheduledFuture = scheduler.scheduleWithFixedDelay(this::triggerOnceSafely, 0, interval, TimeUnit.SECONDS);
+        scheduledFuture = scheduler.scheduleWithFixedDelay(() -> triggerOnceSafely(true), 0, interval, TimeUnit.SECONDS);
         uiLog.log("INFO", "Scheduler started with interval " + interval + " seconds.");
     }
 
@@ -108,6 +111,20 @@ public class SchedulerService {
             return !now.isBefore(start) && !now.isAfter(end);
         }
         return !now.isBefore(start) || !now.isAfter(end);
+    }
+
+    private void waitForJobCompletion() {
+        if (runningFuture == null) {
+            return;
+        }
+        try {
+            runningFuture.get();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            uiLog.log("WARN", "Scheduler interrupted while waiting for job completion.");
+        } catch (Exception ex) {
+            uiLog.log("ERROR", "Scheduled job execution failed: " + ex.getMessage());
+        }
     }
 
     public interface JobFactory {
