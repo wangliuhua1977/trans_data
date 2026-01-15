@@ -160,6 +160,9 @@ public class TransferJob implements Runnable {
             LOGGER.error("Job failed", ex);
         }
     }
+    private void updateProgress(int percent, String message) {
+        progressListener.updateProgress(percent, message);
+    }
 
     private boolean validateCrypto() {
         if (config.getAesKey().isBlank() || config.getAesIv().isBlank()) {
