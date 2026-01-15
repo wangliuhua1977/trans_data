@@ -167,9 +167,7 @@ public class TransferJob implements Runnable {
             }
         }
     }
-    private void updateProgress(int percent, String message) {
-        progressListener.updateProgress(percent, message);
-    }
+
 
     private boolean runAttempt(List<SourceRecord> records,
                                List<GroupKey> keys,
