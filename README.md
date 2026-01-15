@@ -54,8 +54,15 @@ schedule.windowStart=00:00:00
 schedule.windowEnd=23:59:59
 schedule.batchSize=500
 
+# logging
+logging.sql.maxChars=20000
+logging.sql.dumpDir=logs/sql
+
 # https
 https.insecure=true
+
+# async sql
+asyncsql.maxWaitSeconds=900
 ```
 
 ### 关键配置
@@ -66,6 +73,9 @@ https.insecure=true
 - **schedule.windowStart / schedule.windowEnd**：支持跨午夜，如 `23:00:00` → `02:00:00`。
 - **schedule.intervalSeconds**：调度周期；UI 修改后立即生效。
 - **schedule.batchSize**：批量插入大小，默认 500。
+- **logging.sql.maxChars**：SQL/JSON 日志最大展示字符数，超过阈值会截断输出。
+- **logging.sql.dumpDir**：SQL 超长时的落盘目录（按日期分目录）。
+- **asyncsql.maxWaitSeconds**：轮询最大等待时长（秒），超时会结束轮询并记录错误。
 
 > 注意：EASY-APP-KEY / X-Request-Token / AES Key/IV 属于敏感信息，**不得**写入日志或文档示例中。请在本地用户配置文件中填写。
 
@@ -124,7 +134,9 @@ CREATE INDEX IF NOT EXISTS idx_dm_prod_offer_ind_list_leshan_date_no_datetime
 
 - **进度**：展示当前阶段（Fetching/Grouping/Encrypting/Submitting/Polling/Writing/Done/Failed）。
 - **统计**：拉取条数、分组数、当前组/总组、批次进度、当前 jobId。
-- **日志**：每行包含时间戳与级别，且显示 requestId、jobId、耗时等关键信息。
+- **轮询状态**：轮询阶段会显示当前状态、耗时与进度百分比（若后端返回），并仅在状态变化时记录日志。
+- **SQL 记录**：提交前会输出实际 SQL。若 SQL 超过 `logging.sql.maxChars`，日志显示前后片段并提示落盘路径，完整 SQL 写入 `logging.sql.dumpDir/{yyyyMMdd}/sql_{requestId}_{jobId_or_pending}_{groupKey}.sql`。
+- **日志**：每行包含时间戳与级别，且显示 requestId、jobId、耗时等关键信息；取消/中断会明确标记为“Cancelled by user”或“Polling interrupted by stop()”。
 
 ## 排障建议
 

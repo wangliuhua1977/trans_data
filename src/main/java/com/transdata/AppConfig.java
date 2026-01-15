@@ -217,4 +217,17 @@ public class AppConfig {
     public synchronized void setHttpsInsecure(boolean insecure) {
         setBoolean("https.insecure", insecure);
     }
+
+    public synchronized int getLoggingSqlMaxChars() {
+        return getInt("logging.sql.maxChars", 20000);
+    }
+
+    public synchronized String getLoggingSqlDumpDir() {
+        String value = getString("logging.sql.dumpDir");
+        return value.isBlank() ? "logs/sql" : value;
+    }
+
+    public synchronized int getAsyncMaxWaitSeconds() {
+        return getInt("asyncsql.maxWaitSeconds", 900);
+    }
 }
