@@ -40,7 +40,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     private final JTextField endField = new JTextField(8);
     private final JSpinner intervalValue = new JSpinner(new SpinnerNumberModel(180, 1, 86400, 1));
     private final JComboBox<String> intervalUnit = new JComboBox<>(new String[]{"Seconds", "Minutes"});
-    private final JSpinner batchSizeField = new JSpinner(new SpinnerNumberModel(500, 1, 5000, 1));
+    private final JSpinner batchSizeField = new JSpinner(new SpinnerNumberModel(100, 100, 100, 1));
     private final JCheckBox insecureCheck = new JCheckBox("HTTPS insecure");
     private final JButton runOnceButton = new JButton("立即执行一次");
     private final JButton startButton = new JButton("开始");
@@ -99,7 +99,7 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         topPanel.add(intervalUnit, gbc);
 
         gbc.gridx = 3;
-        topPanel.add(new JLabel("批大小"), gbc);
+        topPanel.add(new JLabel("分段大小(固定100)"), gbc);
         gbc.gridx = 4;
         topPanel.add(batchSizeField, gbc);
 
@@ -168,7 +168,8 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         endField.setText(config.getWindowEnd().format(TIME_FORMATTER));
         intervalValue.setValue(config.getIntervalSeconds());
         intervalUnit.setSelectedIndex(0);
-        batchSizeField.setValue(config.getBatchSize());
+        batchSizeField.setValue(100);
+        batchSizeField.setEnabled(false);
         insecureCheck.setSelected(config.isHttpsInsecure());
     }
 
@@ -203,7 +204,6 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
 
         intervalValue.addChangeListener(event -> applyConfigChanges());
         intervalUnit.addActionListener(event -> applyConfigChanges());
-        batchSizeField.addChangeListener(event -> applyConfigChanges());
         insecureCheck.addActionListener(event -> applyConfigChanges());
     }
 
@@ -220,7 +220,6 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
         String unit = (String) intervalUnit.getSelectedItem();
         int seconds = "Minutes".equals(unit) ? interval * 60 : interval;
         config.setIntervalSeconds(seconds);
-        config.setBatchSize((Integer) batchSizeField.getValue());
         config.setHttpsInsecure(insecureCheck.isSelected());
         config.save();
         if (config.isScheduleEnabled()) {
@@ -276,8 +275,8 @@ public class TransDataFrame extends JFrame implements UiLogSink, ProgressListene
     public void updateStats(TransferStats stats) {
         SwingUtilities.invokeLater(() -> {
             String label = "Records: " + stats.getTotalRecords()
-                    + ", Groups: " + stats.getCurrentGroup() + "/" + stats.getTotalGroups()
-                    + ", Batch: " + stats.getCurrentBatch() + "/" + stats.getTotalBatches();
+                    + ", Groups: " + stats.getTotalGroups()
+                    + ", Segment: " + stats.getCurrentBatch() + "/" + stats.getTotalBatches();
             if (stats.getJobId() != null && !stats.getJobId().isBlank()) {
                 label += ", jobId=" + stats.getJobId();
             }

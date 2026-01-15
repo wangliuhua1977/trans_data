@@ -1,5 +1,7 @@
 package com.transdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,6 +22,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TransferJob implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(TransferJob.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int SEGMENT_SIZE = 100;
     private final AppConfig config;
     private final SourceClient sourceClient;
     private final AsyncSqlClient asyncSqlClient;
@@ -77,29 +81,56 @@ public class TransferJob implements Runnable {
             progressListener.updateStats(stats);
             uiLog.log("INFO", "Grouped into " + grouped.size() + " groups by (date_no, datetime). requestId=" + requestId);
 
-            int groupIndex = 0;
-            for (Map.Entry<GroupKey, List<SourceRecord>> entry : grouped.entrySet()) {
+            GroupKey firstKey = grouped.keySet().iterator().next();
+            String firstKeyPolicy = "appearance order";
+            uiLog.log("INFO", "First groupKey policy=" + firstKeyPolicy + ", firstKey=" + firstKey
+                    + ", requestId=" + requestId);
+
+            updateStage("Checking");
+            Boolean exists = runExistenceCheck(firstKey, stats, requestId);
+            if (exists == null) {
+                return;
+            }
+            if (exists) {
+                uiLog.log("INFO", "Existing records found for (date_no, datetime). Skipping this run and waiting for next schedule.");
+                updateStage("Skipped");
+                updateProgress(100, "Skipped due to existing records");
+                return;
+            }
+
+            List<SourceRecord> orderedRecords = flattenRecords(grouped);
+            int totalSegments = calculateTotalSegments(orderedRecords.size());
+            stats.setTotalBatches(totalSegments);
+            stats.setCurrentBatch(0);
+            progressListener.updateStats(stats);
+            uiLog.log("INFO", "Run start: totalRecords=" + orderedRecords.size()
+                    + ", totalSegments=" + totalSegments
+                    + ", firstKey=" + firstKey
+                    + ", firstKeyPolicy=" + firstKeyPolicy
+                    + ", existenceCheckResult=NOT_EXISTS"
+                    + ", requestId=" + requestId);
+
+            List<String> segments = sqlBuilder.buildInsertSqlSegments(orderedRecords, uiLog);
+            for (int i = 0; i < segments.size(); i++) {
                 if (cancelled.get()) {
-                    uiLog.log("WARN", "Job cancelled before processing group.");
+                    uiLog.log("WARN", "Job cancelled before submitting segment.");
                     updateStage("Cancelled");
                     return;
                 }
-                groupIndex++;
-                GroupKey key = entry.getKey();
-                List<SourceRecord> groupRecords = entry.getValue();
-                stats.setCurrentGroup(groupIndex);
-                stats.setTotalBatches(calculateTotalBatches(groupRecords.size(), config.getBatchSize()));
-                stats.setCurrentBatch(0);
+                int segmentIndex = i + 1;
+                stats.setCurrentBatch(segmentIndex);
                 progressListener.updateStats(stats);
-                uiLog.log("INFO", "Processing group " + groupIndex + "/" + grouped.size()
-                        + " key=" + key + ", records=" + groupRecords.size() + ", requestId=" + requestId);
+                String segmentSql = segments.get(i);
+                int segmentRows = Math.min(SEGMENT_SIZE, orderedRecords.size() - (segmentIndex - 1) * SEGMENT_SIZE);
+                uiLog.log("INFO", "Segment " + segmentIndex + "/" + totalSegments + ", rows=" + segmentRows
+                        + ", requestId=" + requestId);
 
                 updateStage("Writing");
-                String sql = buildSqlForGroup(key, groupRecords, stats);
-                logPlainSql(sql, requestId, key, groupRecords.size(), stats.getTotalBatches(), config.getBatchSize());
+                logPlainSql(segmentSql, requestId, firstKey, "segment_" + segmentIndex + "_of_" + totalSegments,
+                        segmentRows, totalSegments);
 
                 updateStage("Encrypting");
-                String encryptedSql = encryptSql(sql);
+                String encryptedSql = encryptSql(segmentSql);
 
                 updateStage("Submitting");
                 AsyncSqlClient.SubmitResponse submitResponse = asyncSqlClient.submit(config, encryptedSql, uiLog, requestId);
@@ -112,53 +143,12 @@ public class TransferJob implements Runnable {
                 updateStage("Polling");
                 AsyncSqlClient.StatusResponse status = asyncSqlClient.pollStatus(
                         config, jobId, uiLog, progressListener, cancelled, requestId);
-                if ("CANCELLED_LOCAL".equalsIgnoreCase(status.getStatus())) {
-                    uiLog.log("WARN", "Job cancelled during polling. jobId=" + jobId + ", requestId=" + requestId
-                            + ", reason=" + status.getErrorMessage());
-                    updateStage("Cancelled");
-                    return;
-                }
-                if ("TIMEOUT".equalsIgnoreCase(status.getStatus())) {
-                    uiLog.log("ERROR", "Polling timeout. jobId=" + jobId
-                            + ", errorMessage=" + status.getErrorMessage()
-                            + ", requestId=" + requestId);
-                    updateStage("Failed");
-                    return;
-                }
-                if (!"SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
-                    uiLog.log("ERROR", "Job failed. jobId=" + jobId
-                            + ", status=" + status.getStatus()
-                            + ", errorMessage=" + safeString(status.getErrorMessage())
-                            + ", errorPosition=" + safeString(status.getErrorPosition())
-                            + ", sqlState=" + safeString(status.getSqlState())
-                            + ", traceId=" + safeString(status.getTraceId())
-                            + ", requestId=" + requestId);
-                    updateStage("Failed");
+                if (handleTerminalStatus(status, jobId, requestId, "Segment " + segmentIndex + "/" + totalSegments)) {
                     return;
                 }
 
-                boolean hasRowsSummary = status.getRowsAffected() != null
-                        || status.getUpdatedRows() != null
-                        || status.getAffectedRows() != null
-                        || status.getActualRows() != null;
-                if (!hasRowsSummary) {
-                    AsyncSqlClient.ResultResponse result = asyncSqlClient.result(config, jobId, uiLog, requestId);
-                    uiLog.log("INFO", "Job succeeded. jobId=" + jobId
-                            + ", rowsAffected=" + result.getRowsAffected()
-                            + ", actualRows=" + result.getActualRows()
-                            + ", columns=" + result.getColumnsCount()
-                            + ", requestId=" + requestId);
-                } else {
-                    uiLog.log("INFO", "Job succeeded. jobId=" + jobId
-                            + ", rowsAffected=" + status.getRowsAffected()
-                            + ", updatedRows=" + status.getUpdatedRows()
-                            + ", affectedRows=" + status.getAffectedRows()
-                            + ", actualRows=" + status.getActualRows()
-                            + ", elapsed=" + status.getElapsedMillis()
-                            + ", requestId=" + requestId);
-                }
-
-                updateProgress(groupIndex, grouped.size());
+                logSuccessSummary(status, jobId, requestId);
+                updateProgress(segmentIndex, totalSegments);
             }
 
             updateStage("Done");
@@ -188,30 +178,189 @@ public class TransferJob implements Runnable {
         return grouped;
     }
 
-    private int calculateTotalBatches(int totalRecords, int batchSize) {
-        return (int) Math.ceil((double) totalRecords / batchSize);
+    private List<SourceRecord> flattenRecords(Map<GroupKey, List<SourceRecord>> grouped) {
+        List<SourceRecord> ordered = new ArrayList<>();
+        for (List<SourceRecord> groupRecords : grouped.values()) {
+            ordered.addAll(groupRecords);
+        }
+        return ordered;
     }
 
-    private String buildSqlForGroup(GroupKey key, List<SourceRecord> records, TransferStats stats) {
-        StringBuilder builder = new StringBuilder();
-        builder.append("BEGIN;");
-        builder.append(sqlBuilder.buildCreateTableSql());
-        builder.append(sqlBuilder.buildCreateIndexSql());
-        builder.append(sqlBuilder.buildDeleteSql(key));
-        List<String> inserts = sqlBuilder.buildInsertSql(records, config.getBatchSize(), uiLog);
-        for (int i = 0; i < inserts.size(); i++) {
-            if (cancelled.get()) {
-                break;
-            }
-            int batchIndex = i + 1;
-            stats.setCurrentBatch(batchIndex);
-            progressListener.updateStats(stats);
-            uiLog.log("INFO", "Batch " + batchIndex + "/" + inserts.size() + " for group "
-                    + stats.getCurrentGroup() + "/" + stats.getTotalGroups());
-            builder.append(inserts.get(i));
+    private int calculateTotalSegments(int totalRecords) {
+        return (int) Math.ceil((double) totalRecords / SEGMENT_SIZE);
+    }
+
+    private Boolean runExistenceCheck(GroupKey firstKey, TransferStats stats, String requestId) throws Exception {
+        if (cancelled.get()) {
+            uiLog.log("WARN", "Job cancelled before existence check.");
+            updateStage("Cancelled");
+            return null;
         }
-        builder.append("COMMIT;");
-        return builder.toString();
+        String checkSql = sqlBuilder.buildExistenceCheckSql(firstKey, uiLog);
+        logPlainSql(checkSql, requestId, firstKey, "existence_check", 1, 1);
+
+        updateStage("Encrypting");
+        String encryptedSql = encryptSql(checkSql);
+
+        updateStage("Submitting");
+        AsyncSqlClient.SubmitResponse submitResponse = asyncSqlClient.submit(config, encryptedSql, uiLog, requestId);
+        String jobId = submitResponse.getJobId();
+        stats.setJobId(jobId);
+        progressListener.updateStats(stats);
+        uiLog.log("INFO", "Submitted existence check jobId=" + jobId + ", status=" + submitResponse.getStatus()
+                + ", requestId=" + requestId);
+
+        updateStage("Polling");
+        AsyncSqlClient.StatusResponse status = asyncSqlClient.pollStatus(
+                config, jobId, uiLog, progressListener, cancelled, requestId);
+        if (handleTerminalStatus(status, jobId, requestId, "Existence check")) {
+            return null;
+        }
+
+        AsyncSqlClient.ResultResponse result = asyncSqlClient.result(config, jobId, uiLog, requestId);
+        boolean exists = resolveExistence(status, result, requestId);
+        uiLog.log("INFO", "Existence check result: " + (exists ? "EXISTS" : "NOT_EXISTS")
+                + ", jobId=" + jobId + ", requestId=" + requestId);
+        return exists;
+    }
+
+    private boolean handleTerminalStatus(AsyncSqlClient.StatusResponse status,
+                                         String jobId,
+                                         String requestId,
+                                         String context) {
+        if ("CANCELLED_LOCAL".equalsIgnoreCase(status.getStatus())) {
+            uiLog.log("WARN", context + " cancelled during polling. jobId=" + jobId + ", requestId=" + requestId
+                    + ", reason=" + status.getErrorMessage());
+            updateStage("Cancelled");
+            return true;
+        }
+        if ("TIMEOUT".equalsIgnoreCase(status.getStatus())) {
+            uiLog.log("ERROR", context + " polling timeout. jobId=" + jobId
+                    + ", errorMessage=" + status.getErrorMessage()
+                    + ", requestId=" + requestId);
+            updateStage("Failed");
+            return true;
+        }
+        if (!"SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
+            uiLog.log("ERROR", context + " failed. jobId=" + jobId
+                    + ", status=" + status.getStatus()
+                    + ", errorMessage=" + safeString(status.getErrorMessage())
+                    + ", errorPosition=" + safeString(status.getErrorPosition())
+                    + ", sqlState=" + safeString(status.getSqlState())
+                    + ", traceId=" + safeString(status.getTraceId())
+                    + ", requestId=" + requestId);
+            updateStage("Failed");
+            return true;
+        }
+        return false;
+    }
+
+    private void logSuccessSummary(AsyncSqlClient.StatusResponse status, String jobId, String requestId) throws Exception {
+        boolean hasRowsSummary = status.getRowsAffected() != null
+                || status.getUpdatedRows() != null
+                || status.getAffectedRows() != null
+                || status.getActualRows() != null;
+        if (!hasRowsSummary) {
+            AsyncSqlClient.ResultResponse result = asyncSqlClient.result(config, jobId, uiLog, requestId);
+            uiLog.log("INFO", "Job succeeded. jobId=" + jobId
+                    + ", rowsAffected=" + result.getRowsAffected()
+                    + ", actualRows=" + result.getActualRows()
+                    + ", columns=" + result.getColumnsCount()
+                    + ", requestId=" + requestId);
+        } else {
+            uiLog.log("INFO", "Job succeeded. jobId=" + jobId
+                    + ", rowsAffected=" + status.getRowsAffected()
+                    + ", updatedRows=" + status.getUpdatedRows()
+                    + ", affectedRows=" + status.getAffectedRows()
+                    + ", actualRows=" + status.getActualRows()
+                    + ", elapsed=" + status.getElapsedMillis()
+                    + ", requestId=" + requestId);
+        }
+    }
+
+    private boolean resolveExistence(AsyncSqlClient.StatusResponse status,
+                                     AsyncSqlClient.ResultResponse result,
+                                     String requestId) {
+        Integer count = firstNonNull(status.getRowsAffected(),
+                status.getUpdatedRows(),
+                status.getAffectedRows(),
+                status.getActualRows(),
+                result.getRowsAffected(),
+                result.getActualRows());
+        if (count != null) {
+            return count > 0;
+        }
+        String rawJson = result.getRawJson();
+        if (rawJson == null || rawJson.isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(rawJson);
+            Integer rowCount = extractNumeric(root, "rowCount", "rowsAffected", "actualRows", "count");
+            if (rowCount != null) {
+                return rowCount > 0;
+            }
+            if (hasRowsArray(root)) {
+                return true;
+            }
+        } catch (Exception ex) {
+            uiLog.log("WARN", "Failed to parse existence check result JSON: " + ex.getMessage()
+                    + ", requestId=" + requestId);
+        }
+        return false;
+    }
+
+    private boolean hasRowsArray(JsonNode node) {
+        if (node == null || node.isMissingNode()) {
+            return false;
+        }
+        JsonNode rows = node.path("rows");
+        if (rows.isArray() && rows.size() > 0) {
+            return true;
+        }
+        JsonNode data = node.path("data");
+        if (data.isArray() && data.size() > 0) {
+            return true;
+        }
+        if (data.isObject()) {
+            JsonNode dataRows = data.path("rows");
+            if (dataRows.isArray() && dataRows.size() > 0) {
+                return true;
+            }
+            JsonNode dataData = data.path("data");
+            return dataData.isArray() && dataData.size() > 0;
+        }
+        return false;
+    }
+
+    private Integer extractNumeric(JsonNode node, String... fields) {
+        for (String field : fields) {
+            JsonNode value = node.path(field);
+            if (value.isNumber()) {
+                return value.asInt();
+            }
+            if (value.isTextual()) {
+                try {
+                    return Integer.parseInt(value.asText().trim());
+                } catch (NumberFormatException ignored) {
+                    // continue
+                }
+            }
+        }
+        return null;
+    }
+
+    @SafeVarargs
+    private final <T> T firstNonNull(T... values) {
+        if (values == null) {
+            return null;
+        }
+        for (T value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private String encryptSql(String sql) throws Exception {
@@ -223,15 +372,15 @@ public class TransferJob implements Runnable {
     private void logPlainSql(String sql,
                              String requestId,
                              GroupKey key,
+                             String contextTag,
                              int records,
-                             int totalBatches,
-                             int batchSize) {
+                             int totalSegments) {
         String targetTable = sqlBuilder.getTargetTable();
         uiLog.log("INFO", "Prepared SQL for submit. requestId=" + requestId
+                + ", context=" + contextTag
                 + ", groupKey=" + key
                 + ", records=" + records
-                + ", batchSize=" + batchSize
-                + ", batches=" + totalBatches
+                + ", segments=" + totalSegments
                 + ", dbUser=" + config.getAsyncDbUser()
                 + ", targetTable=" + targetTable);
         int maxChars = config.getLoggingSqlMaxChars();
@@ -239,7 +388,7 @@ public class TransferJob implements Runnable {
             int snippet = Math.min(8000, Math.max(1, maxChars / 2));
             String head = sql.substring(0, Math.min(snippet, sql.length()));
             String tail = sql.substring(Math.max(0, sql.length() - snippet));
-            Path filePath = buildSqlDumpPath(requestId, "pending", key);
+            Path filePath = buildSqlDumpPath(requestId, contextTag, key);
             uiLog.log("INFO", "SQL preview (truncated). Full SQL will be saved to " + filePath
                     + ". Preview=" + head + "...(truncated " + (sql.length() - (head.length() + tail.length()))
                     + " chars)..." + tail);
@@ -249,13 +398,13 @@ public class TransferJob implements Runnable {
         }
     }
 
-    private Path buildSqlDumpPath(String requestId, String jobId, GroupKey key) {
+    private Path buildSqlDumpPath(String requestId, String contextTag, GroupKey key) {
         String date = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
         String dumpDir = config.getLoggingSqlDumpDir();
         String safeGroup = sanitizeFilePart(key.getDateNo() + "_" + key.getDatetime());
         String safeRequest = sanitizeFilePart(requestId);
-        String safeJob = sanitizeFilePart(jobId);
-        return Paths.get(dumpDir, date, "sql_" + safeRequest + "_" + safeJob + "_" + safeGroup + ".sql");
+        String safeContext = sanitizeFilePart(contextTag);
+        return Paths.get(dumpDir, date, "sql_" + safeRequest + "_" + safeContext + "_" + safeGroup + ".sql");
     }
 
     private void writeSqlDump(Path path, String sql) {
@@ -279,9 +428,9 @@ public class TransferJob implements Runnable {
         progressListener.updateStage(stage);
     }
 
-    private void updateProgress(int currentGroup, int totalGroups) {
-        int percent = totalGroups == 0 ? 100 : (int) Math.round((currentGroup * 100.0) / totalGroups);
-        progressListener.updateProgress(percent, "Group " + currentGroup + "/" + totalGroups);
+    private void updateProgress(int currentSegment, int totalSegments) {
+        int percent = totalSegments == 0 ? 100 : (int) Math.round((currentSegment * 100.0) / totalSegments);
+        progressListener.updateProgress(percent, "Segment " + currentSegment + "/" + totalSegments);
     }
 
     private String safeString(String value) {
