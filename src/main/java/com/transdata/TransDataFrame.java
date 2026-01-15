@@ -1,6 +1,6 @@
 package com.transdata;
 
-import org.apache.hc.client5.http.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.core5.util.Timeout;
 
 import javax.swing.BorderFactory;

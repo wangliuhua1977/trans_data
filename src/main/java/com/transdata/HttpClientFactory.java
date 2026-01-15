@@ -1,6 +1,7 @@
 package com.transdata;
 
-import org.apache.hc.client5.http.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
@@ -8,7 +9,6 @@ import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
 import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactory;
 import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactoryBuilder;
 import org.apache.hc.core5.http.io.SocketConfig;
-import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.ssl.SSLContextBuilder;
 import org.apache.hc.core5.ssl.TrustAllStrategy;
 import org.apache.hc.core5.util.Timeout;
@@ -53,17 +53,14 @@ public class HttpClientFactory {
                 .setSoTimeout(responseTimeout)
                 .build());
 
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(connectTimeout)
+                .setResponseTimeout(responseTimeout)
+                .build();
+
         return HttpClients.custom()
                 .setConnectionManager(connectionManager)
-                .setDefaultRequestConfig(config -> config
-                        .setConnectTimeout(connectTimeout)
-                        .setResponseTimeout(responseTimeout))
+                .setDefaultRequestConfig(requestConfig)
                 .build();
-    }
-
-    public static ClassicRequestBuilder configureTimeouts(ClassicRequestBuilder builder, Timeout connectTimeout, Timeout responseTimeout) {
-        return builder
-                .setConnectTimeout(connectTimeout)
-                .setResponseTimeout(responseTimeout);
     }
 }

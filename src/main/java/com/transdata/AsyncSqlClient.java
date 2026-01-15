@@ -2,10 +2,11 @@ package com.transdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.hc.client5.http.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
-import org.apache.hc.client5.http.entity.StringEntity;
+import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.util.Timeout;
@@ -105,8 +106,11 @@ public class AsyncSqlClient {
             post.setHeader("X-Request-Token", config.getAsyncToken());
         }
         post.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
-        post.setConnectTimeout(connectTimeout);
-        post.setResponseTimeout(responseTimeout);
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(connectTimeout)
+                .setResponseTimeout(responseTimeout)
+                .build();
+        post.setConfig(requestConfig);
 
         try (CloseableHttpResponse response = httpClient.execute(post)) {
             String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
