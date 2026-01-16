@@ -190,6 +190,18 @@ CREATE INDEX IF NOT EXISTS idx_stg_custom_task_run_id
 - 显示 HTTP 状态、耗时、响应大小与完整 JSON（可复制）。
 - **仅测试，不写库**。
 
+## 界面布局自适应说明
+
+主界面采用 **JSplitPane** 横向拆分：左侧任务列表、右侧任务详情。选择它是为了让右侧详情区成为真正可扩展的 CENTER 区域，默认让右侧获得更多空间，并允许用户拖拽分隔条适配不同分辨率。左侧任务列表设置最小宽度，避免窗口缩小时被挤压不可用。  
+
+右侧各页签统一使用 **BorderLayout + JScrollPane** 的结构，滚动面板内的内容使用 **GridBagLayout** 并固定 **NORTHWEST** 锚点，同时追加一个填充行以确保内容始终贴近左上角。这样在窗口变窄或变矮时不会出现居中漂移，控件会横向拉伸，纵向不足时自动出现滚动条，保证各字段始终可访问。
+
+构建命令（PowerShell）：
+
+```powershell
+mvn -DskipTests package
+```
+
 ## 构建与运行
 
 ```powershell
