@@ -22,7 +22,7 @@ public class AutoSqlGenerator {
         List<JsonNode> safeRecords = records == null ? List.of() : records;
         List<FieldSpec> specs = infer.infer(safeRecords);
         if (safeRecords.isEmpty()) {
-            warnings.add("测试样本记录为空，已生成最小安全表结构与模板");
+            warnings.add("No data array records detected; generated generic payload structure; please edit manually.");
         }
         String schema = normalize(task.getTargetConfig().getTargetSchema(), DEFAULT_SCHEMA);
         String table = task.getTargetConfig().getTargetTable();

@@ -87,9 +87,26 @@ order_item_id,date_no,amount => ${order_item_id?text},${date_no?num},${amount?nu
 
 在“测试”页完成**测试源接口**后，点击“自动生成DDL与模板”：
 
-1. 解析测试返回的真实 JSON，自动定位记录数组（`data`/`rows`/`resultRows`/`data.rows`/`data.data` 等）。
+1. 解析测试返回的真实 JSON，**仅使用根节点 `data` 数组作为记录来源**（`root.data[]`）。
 2. 生成 `createTableSql`（PostgreSQL DDL）与 `insertTemplate`，并自动填充到表单。
 3. 可在保存前手工修改 DDL 与模板，保存后持久化到 `tasks.json`。
+
+推断示例（只使用 `data[]` 内字段，不使用 `code/message/timestamp/requestTime/executeTime`）：
+
+```json
+{
+  "code": 1,
+  "message": "success",
+  "data": [
+    { "staff_id": "A01", "staff_name": "张三", "age": 27 }
+  ],
+  "timestamp": 1710000000,
+  "requestTime": 1710000000,
+  "executeTime": 32
+}
+```
+
+上述示例只会生成 `staff_id / staff_name / age` 对应列，不会生成 `code/message/timestamp/requestTime/executeTime` 列。
 
 ### 类型推断规则（安全优先）
 
@@ -106,7 +123,8 @@ order_item_id,date_no,amount => ${order_item_id?text},${date_no?num},${amount?nu
 
 ### 空样本与嵌套 JSON 处理
 
-- 若记录数组为空：仍会生成最小安全结构（含 `payload` + 审计列），并在日志提示。
+- 若 `data[]` 缺失/非数组/为空/元素非对象：进入降级模式，生成最小安全结构（含 `payload` + 审计列），并提示：
+  - `No data array records detected; generated generic payload structure; please edit manually.`
 - 若字段为嵌套对象或数组：默认不展开，保留在 `payload jsonb` 中，避免插入失败。
 
 ### 预览与排错
