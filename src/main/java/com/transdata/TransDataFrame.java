@@ -6,6 +6,7 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.core5.util.Timeout;
 
 import javax.swing.BorderFactory;
+import javax.swing.Box;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
@@ -13,6 +14,7 @@ import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JList;
+import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -21,7 +23,6 @@ import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
-import javax.swing.JToolBar;
 import javax.swing.ListSelectionModel;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
@@ -30,6 +31,7 @@ import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -46,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TransDataFrame extends JFrame {
+    private static final Insets FORM_INSETS = new Insets(8, 8, 8, 8);
     private final AppConfig config;
     private final TaskStore taskStore;
     private final DefaultListModel<TaskDefinition> taskListModel = new DefaultListModel<>();
@@ -120,7 +123,7 @@ public class TransDataFrame extends JFrame {
 
     private void initLayout() {
         JSplitPane splitPane = new JSplitPane();
-        splitPane.setResizeWeight(0.2);
+        splitPane.setResizeWeight(0.25);
         splitPane.setLeftComponent(buildTaskListPanel());
         splitPane.setRightComponent(buildDetailPanel());
         getContentPane().setLayout(new BorderLayout());
@@ -138,6 +141,7 @@ public class TransDataFrame extends JFrame {
     private JPanel buildTaskListPanel() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("任务列表"));
+        panel.setMinimumSize(new Dimension(240, 200));
         taskList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         taskList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
@@ -155,8 +159,7 @@ public class TransDataFrame extends JFrame {
         JButton addButton = new JButton("新增");
         JButton deleteButton = new JButton("删除");
         JButton toggleButton = new JButton("启用/停用");
-        JToolBar toolBar = new JToolBar();
-        toolBar.setFloatable(false);
+        JPanel toolBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         toolBar.add(addButton);
         toolBar.add(deleteButton);
         toolBar.add(toggleButton);
@@ -179,8 +182,7 @@ public class TransDataFrame extends JFrame {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("任务详情"));
 
-        JToolBar toolbar = new JToolBar();
-        toolbar.setFloatable(false);
+        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         JButton runOnceButton = new JButton("立即执行一次");
         JButton startButton = new JButton("启动调度");
         JButton stopButton = new JButton("停止调度");
@@ -197,8 +199,8 @@ public class TransDataFrame extends JFrame {
         tabs.addTab("调度", buildSchedulePanel());
         tabs.addTab("目标与插入", buildTargetPanel());
         tabs.addTab("测试", buildTestPanel());
-        logsContainer = buildLogsPanel();
-        tabs.addTab("日志", logsContainer);
+        JPanel logsTab = buildLogsPanel();
+        tabs.addTab("日志", logsTab);
 
         panel.add(toolbar, BorderLayout.NORTH);
         panel.add(tabs, BorderLayout.CENTER);
@@ -206,205 +208,65 @@ public class TransDataFrame extends JFrame {
     }
 
     private JPanel buildBasicPanel() {
-        JPanel panel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(4, 4, 4, 4);
-        gbc.anchor = GridBagConstraints.WEST;
+        JPanel content = new JPanel(new GridBagLayout());
 
         taskIdField.setEditable(false);
 
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        panel.add(new javax.swing.JLabel("任务ID"), gbc);
-        gbc.gridx = 1;
-        panel.add(taskIdField, gbc);
+        addFormRow(content, 0, "任务ID", taskIdField);
+        addFormRow(content, 1, "任务名称", taskNameField);
+        addFormRow(content, 2, "启用状态", enabledCheck);
+        addFormRow(content, 3, "源 POST URL", sourceUrlField);
+        addFormRow(content, 4, "请求体", new JScrollPane(sourceBodyArea), GridBagConstraints.BOTH, 0.3, true);
+        addFormRow(content, 5, "分段大小", batchSizeSpinner);
+        addFillerRow(content, 6);
 
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        panel.add(new javax.swing.JLabel("任务名称"), gbc);
-        gbc.gridx = 1;
-        panel.add(taskNameField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        panel.add(new javax.swing.JLabel("启用状态"), gbc);
-        gbc.gridx = 1;
-        panel.add(enabledCheck, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        panel.add(new javax.swing.JLabel("源 POST URL"), gbc);
-        gbc.gridx = 1;
-        panel.add(sourceUrlField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        panel.add(new javax.swing.JLabel("请求体"), gbc);
-        gbc.gridx = 1;
-        panel.add(new JScrollPane(sourceBodyArea), gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 5;
-        gbc.anchor = GridBagConstraints.WEST;
-        panel.add(new javax.swing.JLabel("分段大小"), gbc);
-        gbc.gridx = 1;
-        panel.add(batchSizeSpinner, gbc);
-
-        return panel;
+        return wrapScrollableTab(content);
     }
 
     private JPanel buildSchedulePanel() {
-        JPanel panel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(4, 4, 4, 4);
-        gbc.anchor = GridBagConstraints.WEST;
+        JPanel content = new JPanel(new GridBagLayout());
+        addFormRow(content, 0, "间隔（秒）", intervalValue);
+        addFormRow(content, 1, "窗口开始", windowStartField);
+        addFormRow(content, 2, "窗口结束", windowEndField);
+        addFormRow(content, 3, "最大重试", maxRetriesSpinner);
+        addFormRow(content, 4, "锁租约秒数", leaseSecondsSpinner);
+        addFillerRow(content, 5);
 
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        panel.add(new javax.swing.JLabel("间隔（秒）"), gbc);
-        gbc.gridx = 1;
-        panel.add(intervalValue, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        panel.add(new javax.swing.JLabel("窗口开始"), gbc);
-        gbc.gridx = 1;
-        panel.add(windowStartField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        panel.add(new javax.swing.JLabel("窗口结束"), gbc);
-        gbc.gridx = 1;
-        panel.add(windowEndField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        panel.add(new javax.swing.JLabel("最大重试"), gbc);
-        gbc.gridx = 1;
-        panel.add(maxRetriesSpinner, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        panel.add(new javax.swing.JLabel("锁租约秒数"), gbc);
-        gbc.gridx = 1;
-        panel.add(leaseSecondsSpinner, gbc);
-
-        return panel;
+        return wrapScrollableTab(content);
     }
 
     private JPanel buildTargetPanel() {
-        JPanel panel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(4, 4, 4, 4);
-        gbc.anchor = GridBagConstraints.WEST;
-
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        panel.add(new javax.swing.JLabel("目标 Schema"), gbc);
-        gbc.gridx = 1;
-        panel.add(targetSchemaField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        panel.add(new javax.swing.JLabel("目标表"), gbc);
-        gbc.gridx = 1;
-        panel.add(targetTableField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        panel.add(new javax.swing.JLabel("建表 SQL"), gbc);
-        gbc.gridx = 1;
-        panel.add(new JScrollPane(createTableArea), gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.anchor = GridBagConstraints.WEST;
-        panel.add(new javax.swing.JLabel("插入模式"), gbc);
-        gbc.gridx = 1;
-        panel.add(insertModeCombo, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        panel.add(new javax.swing.JLabel("插入模板"), gbc);
-        gbc.gridx = 1;
-        panel.add(new JScrollPane(insertTemplateArea), gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 5;
-        gbc.anchor = GridBagConstraints.WEST;
-        panel.add(new javax.swing.JLabel("冲突目标"), gbc);
-        gbc.gridx = 1;
-        panel.add(conflictTargetField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 6;
-        panel.add(new javax.swing.JLabel("范围键字段"), gbc);
-        gbc.gridx = 1;
-        panel.add(scopeKeyField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 7;
-        panel.add(new javax.swing.JLabel("自然键字段"), gbc);
-        gbc.gridx = 1;
-        panel.add(naturalKeyField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 8;
-        panel.add(new javax.swing.JLabel("去重字段"), gbc);
-        gbc.gridx = 1;
-        panel.add(distinctKeyField, gbc);
-
+        JPanel content = new JPanel(new GridBagLayout());
         mappingPreviewArea.setEditable(false);
         mappingPreviewArea.setLineWrap(false);
         previewSqlArea.setEditable(false);
         previewSqlArea.setLineWrap(false);
 
-        gbc.gridx = 0;
-        gbc.gridy = 9;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        panel.add(new javax.swing.JLabel("映射预览"), gbc);
-        gbc.gridx = 1;
-        panel.add(new JScrollPane(mappingPreviewArea), gbc);
+        addFormRow(content, 0, "目标 Schema", targetSchemaField);
+        addFormRow(content, 1, "目标表", targetTableField);
+        addFormRow(content, 2, "建表 SQL", new JScrollPane(createTableArea), GridBagConstraints.BOTH, 0.3, true);
+        addFormRow(content, 3, "插入模式", insertModeCombo);
+        addFormRow(content, 4, "插入模板", new JScrollPane(insertTemplateArea), GridBagConstraints.BOTH, 0.3, true);
+        addFormRow(content, 5, "冲突目标", conflictTargetField);
+        addFormRow(content, 6, "范围键字段", scopeKeyField);
+        addFormRow(content, 7, "自然键字段", naturalKeyField);
+        addFormRow(content, 8, "去重字段", distinctKeyField);
+        addFormRow(content, 9, "映射预览", new JScrollPane(mappingPreviewArea), GridBagConstraints.BOTH, 0.3, true);
+        addFormRow(content, 10, "插入预览SQL", new JScrollPane(previewSqlArea), GridBagConstraints.BOTH, 0.3, true);
+        addFillerRow(content, 11);
 
-        gbc.gridx = 0;
-        gbc.gridy = 10;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        panel.add(new javax.swing.JLabel("插入预览SQL"), gbc);
-        gbc.gridx = 1;
-        panel.add(new JScrollPane(previewSqlArea), gbc);
-
-        return panel;
+        return wrapScrollableTab(content);
     }
 
     private JPanel buildTestPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
+        JPanel content = new JPanel(new GridBagLayout());
         JPanel infoPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(4, 4, 4, 4);
-        gbc.anchor = GridBagConstraints.WEST;
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        infoPanel.add(new javax.swing.JLabel("HTTP 状态"), gbc);
-        gbc.gridx = 1;
+        addFormRow(infoPanel, 0, "HTTP 状态", testStatusField);
+        addFormRow(infoPanel, 1, "耗时", testElapsedField);
+        addFormRow(infoPanel, 2, "响应大小", testSizeField);
         testStatusField.setEditable(false);
-        infoPanel.add(testStatusField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        infoPanel.add(new javax.swing.JLabel("耗时"), gbc);
-        gbc.gridx = 1;
         testElapsedField.setEditable(false);
-        infoPanel.add(testElapsedField, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        infoPanel.add(new javax.swing.JLabel("响应大小"), gbc);
-        gbc.gridx = 1;
         testSizeField.setEditable(false);
-        infoPanel.add(testSizeField, gbc);
 
         JButton testButton = new JButton("测试源接口");
         testButton.addActionListener(event -> runTest());
@@ -423,15 +285,90 @@ public class TransDataFrame extends JFrame {
         testResponseArea.setEditable(false);
         testResponseArea.setLineWrap(false);
         JScrollPane scrollPane = new JScrollPane(testResponseArea);
-        scrollPane.setPreferredSize(new Dimension(800, 400));
 
-        panel.add(topPanel, BorderLayout.NORTH);
+        GridBagConstraints topGbc = new GridBagConstraints();
+        topGbc.gridx = 0;
+        topGbc.gridy = 0;
+        topGbc.insets = FORM_INSETS;
+        topGbc.anchor = GridBagConstraints.NORTHWEST;
+        topGbc.fill = GridBagConstraints.HORIZONTAL;
+        topGbc.weightx = 1;
+        content.add(topPanel, topGbc);
+
+        GridBagConstraints responseGbc = new GridBagConstraints();
+        responseGbc.gridx = 0;
+        responseGbc.gridy = 1;
+        responseGbc.insets = FORM_INSETS;
+        responseGbc.anchor = GridBagConstraints.NORTHWEST;
+        responseGbc.fill = GridBagConstraints.BOTH;
+        responseGbc.weightx = 1;
+        responseGbc.weighty = 0.6;
+        content.add(scrollPane, responseGbc);
+
+        GridBagConstraints fillerGbc = new GridBagConstraints();
+        fillerGbc.gridx = 0;
+        fillerGbc.gridy = 2;
+        fillerGbc.weightx = 1;
+        fillerGbc.weighty = 1;
+        fillerGbc.fill = GridBagConstraints.BOTH;
+        content.add(Box.createGlue(), fillerGbc);
+
+        return wrapScrollableTab(content);
+    }
+
+    private JPanel buildLogsPanel() {
+        JPanel content = new JPanel(new BorderLayout());
+        JPanel wrapper = new JPanel(new BorderLayout());
+        JScrollPane scrollPane = new JScrollPane(content);
+        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        wrapper.add(scrollPane, BorderLayout.CENTER);
+        logsContainer = content;
+        return wrapper;
+    }
+
+    private JPanel wrapScrollableTab(JPanel content) {
+        JPanel panel = new JPanel(new BorderLayout());
+        JScrollPane scrollPane = new JScrollPane(content);
+        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
         panel.add(scrollPane, BorderLayout.CENTER);
         return panel;
     }
 
-    private JPanel buildLogsPanel() {
-        return new JPanel(new BorderLayout());
+    private void addFormRow(JPanel panel, int row, String labelText, java.awt.Component field) {
+        addFormRow(panel, row, labelText, field, GridBagConstraints.HORIZONTAL, 0, false);
+    }
+
+    private void addFormRow(JPanel panel, int row, String labelText, java.awt.Component field, int fill, double weighty,
+                            boolean labelTopAlign) {
+        GridBagConstraints labelGbc = new GridBagConstraints();
+        labelGbc.gridx = 0;
+        labelGbc.gridy = row;
+        labelGbc.insets = FORM_INSETS;
+        labelGbc.anchor = labelTopAlign ? GridBagConstraints.NORTHEAST : GridBagConstraints.EAST;
+        labelGbc.fill = GridBagConstraints.NONE;
+        labelGbc.weightx = 0;
+        panel.add(new JLabel(labelText), labelGbc);
+
+        GridBagConstraints fieldGbc = new GridBagConstraints();
+        fieldGbc.gridx = 1;
+        fieldGbc.gridy = row;
+        fieldGbc.insets = FORM_INSETS;
+        fieldGbc.anchor = GridBagConstraints.NORTHWEST;
+        fieldGbc.fill = fill;
+        fieldGbc.weightx = 1;
+        fieldGbc.weighty = weighty;
+        panel.add(field, fieldGbc);
+    }
+
+    private void addFillerRow(JPanel panel, int row) {
+        GridBagConstraints fillerGbc = new GridBagConstraints();
+        fillerGbc.gridx = 0;
+        fillerGbc.gridy = row;
+        fillerGbc.gridwidth = 2;
+        fillerGbc.weightx = 1;
+        fillerGbc.weighty = 1;
+        fillerGbc.fill = GridBagConstraints.BOTH;
+        panel.add(Box.createGlue(), fillerGbc);
     }
 
     private void initActions() {
