@@ -84,21 +84,15 @@ public class SourceClient {
             int bytes = responseBody.getBytes(StandardCharsets.UTF_8).length;
             JsonNode root = objectMapper.readTree(responseBody);
             String pretty = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
-            int code = root.path("code").asInt(-1);
-            if (code != 1) {
-                String message = root.path("message").asText("未知");
-                uiLog.log("ERROR", "源接口返回异常：code=" + code + "，message=" + message);
-                throw new IllegalStateException("源接口返回 code " + code + ": " + message);
+            if (root.has("code")) {
+                int code = root.path("code").asInt(-1);
+                if (code != 1) {
+                    String message = root.path("message").asText("未知");
+                    uiLog.log("ERROR", "源接口返回异常：code=" + code + "，message=" + message);
+                    throw new IllegalStateException("源接口返回 code " + code + ": " + message);
+                }
             }
-            JsonNode data = root.path("data");
-            if (!data.isArray()) {
-                uiLog.log("ERROR", "源接口响应缺少 data 数组。");
-                throw new IllegalStateException("源接口 data 不是数组");
-            }
-            List<JsonNode> records = new ArrayList<>();
-            for (JsonNode node : data) {
-                records.add(node);
-            }
+            List<JsonNode> records = JsonRecordLocator.locateRecords(root);
             return new SourceFetchResult(statusCode, elapsed, bytes, responseBody, pretty, records);
         }
     }
@@ -116,13 +110,15 @@ public class SourceClient {
             String responseBody = EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
             int bytes = responseBody.getBytes(StandardCharsets.UTF_8).length;
             String pretty = responseBody;
+            List<JsonNode> records = List.of();
             try {
                 JsonNode root = objectMapper.readTree(responseBody);
                 pretty = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+                records = JsonRecordLocator.locateRecords(root);
             } catch (Exception ignored) {
                 // keep raw
             }
-            return new SourceFetchResult(statusCode, elapsed, bytes, responseBody, pretty, List.of());
+            return new SourceFetchResult(statusCode, elapsed, bytes, responseBody, pretty, records);
         }
     }
 
