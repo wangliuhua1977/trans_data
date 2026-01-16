@@ -9,6 +9,7 @@
 - staging + 稽核 + 修复：全量写入 staging，再按策略写目标表，稽核失败自动清理与重试。
 - 插入模板：用占位符把 JSON 字段映射到 SQL 列，支持数值/文本处理。
 - 源接口测试：直接展示 HTTP 状态、耗时、响应大小与格式化 JSON。
+- 测试样本自动生成：测试源接口后，可自动生成建表 SQL 与插入模板（可编辑后保存）。
 - UI 日志最多保留 1000 行，自动丢弃最早记录。
 
 > 注意：界面中不再暴露 “HTTPS 不安全模式” 选项，但配置项仍可保留以兼容旧环境。
@@ -71,6 +72,8 @@
 
 - `${field}` 或 `${field?text}`：等价于 `NULLIF(payload->>'field','')`（空字符串视为 NULL）。
 - `${field?num}`：等价于 `NULLIF(payload->>'field','')::numeric`。
+- `${field?bool}`：等价于 `NULLIF(payload->>'field','')::boolean`，仅支持 true/false/NULL。
+- `${field?jsonb}`：等价于 `payload->'field'`（JSONB 字段，保留原始结构）。
 
 示例：
 
@@ -79,6 +82,38 @@ order_item_id,date_no,amount => ${order_item_id?text},${date_no?num},${amount?nu
 ```
 
 > 任务执行时会从 staging 表 `payload` 中取值并生成 INSERT SELECT。
+
+## 测试样本自动生成 DDL 与插入模板
+
+在“测试”页完成**测试源接口**后，点击“自动生成DDL与模板”：
+
+1. 解析测试返回的真实 JSON，自动定位记录数组（`data`/`rows`/`resultRows`/`data.rows`/`data.data` 等）。
+2. 生成 `createTableSql`（PostgreSQL DDL）与 `insertTemplate`，并自动填充到表单。
+3. 可在保存前手工修改 DDL 与模板，保存后持久化到 `tasks.json`。
+
+### 类型推断规则（安全优先）
+
+- 数字：全为整数且在 bigint 范围内 → `bigint`；包含小数或超范围 → `numeric`
+- 布尔：`boolean`
+- 字符串：默认 `text`
+- 嵌套对象/数组：不自动展开，统一落在 `payload jsonb`
+
+默认强制添加公共列：
+
+- `task_id text`
+- `task_run_id text`
+- `created_at timestamptz default now()`
+
+### 空样本与嵌套 JSON 处理
+
+- 若记录数组为空：仍会生成最小安全结构（含 `payload` + 审计列），并在日志提示。
+- 若字段为嵌套对象或数组：默认不展开，保留在 `payload jsonb` 中，避免插入失败。
+
+### 预览与排错
+
+- 生成后会使用前 1～3 条记录渲染插入预览 SQL（不落库）。
+- 若字段缺失或类型不匹配，会在日志提示；你仍可以手动调整模板。
+- `SKIP_DUPLICATES` 模式建议配置唯一约束或 `conflictTarget`，否则可能无法有效去重。
 
 ## 插入模式与稽核/修复
 

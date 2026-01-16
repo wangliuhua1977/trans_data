@@ -30,7 +30,19 @@ public class TemplateRenderer {
         if ("num".equalsIgnoreCase(modifier)) {
             return "NULLIF(payload->>'" + safeField + "','')::numeric";
         }
+        if ("bool".equalsIgnoreCase(modifier)) {
+            return "NULLIF(payload->>'" + safeField + "','')::boolean";
+        }
+        if ("jsonb".equalsIgnoreCase(modifier)) {
+            if ("payload".equalsIgnoreCase(safeField)) {
+                return "payload";
+            }
+            return "payload->'" + safeField + "'";
+        }
         if ("raw".equalsIgnoreCase(modifier)) {
+            if ("task_id".equalsIgnoreCase(safeField) || "run_id".equalsIgnoreCase(safeField)) {
+                return safeField;
+            }
             return "payload->>'" + safeField + "'";
         }
         return "NULLIF(payload->>'" + safeField + "','')";

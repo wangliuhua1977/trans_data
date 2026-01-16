@@ -1,5 +1,7 @@
 package com.transdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.core5.util.Timeout;
 
@@ -31,6 +33,7 @@ import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.GridLayout;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.ArrayList;
@@ -77,6 +80,8 @@ public class TransDataFrame extends JFrame {
     private final JTextArea createTableArea = new JTextArea(6, 32);
     private final JComboBox<InsertMode> insertModeCombo = new JComboBox<>(InsertMode.values());
     private final JTextArea insertTemplateArea = new JTextArea(6, 32);
+    private final JTextArea mappingPreviewArea = new JTextArea(6, 32);
+    private final JTextArea previewSqlArea = new JTextArea(6, 32);
     private final JTextField conflictTargetField = new JTextField(20);
     private final JTextField scopeKeyField = new JTextField(24);
     private final JTextField naturalKeyField = new JTextField(24);
@@ -86,6 +91,10 @@ public class TransDataFrame extends JFrame {
     private final JTextField testStatusField = new JTextField(20);
     private final JTextField testElapsedField = new JTextField(20);
     private final JTextField testSizeField = new JTextField(20);
+    private final JCheckBox uniqueConstraintCheck = new JCheckBox("建议唯一约束/索引");
+    private final JButton autoGenerateButton = new JButton("自动生成DDL与模板");
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private List<JsonNode> lastTestRecords = List.of();
 
     private JPanel logsContainer;
 
@@ -348,6 +357,25 @@ public class TransDataFrame extends JFrame {
         gbc.gridx = 1;
         panel.add(distinctKeyField, gbc);
 
+        mappingPreviewArea.setEditable(false);
+        mappingPreviewArea.setLineWrap(false);
+        previewSqlArea.setEditable(false);
+        previewSqlArea.setLineWrap(false);
+
+        gbc.gridx = 0;
+        gbc.gridy = 9;
+        gbc.anchor = GridBagConstraints.NORTHWEST;
+        panel.add(new javax.swing.JLabel("映射预览"), gbc);
+        gbc.gridx = 1;
+        panel.add(new JScrollPane(mappingPreviewArea), gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 10;
+        gbc.anchor = GridBagConstraints.NORTHWEST;
+        panel.add(new javax.swing.JLabel("插入预览SQL"), gbc);
+        gbc.gridx = 1;
+        panel.add(new JScrollPane(previewSqlArea), gbc);
+
         return panel;
     }
 
@@ -380,10 +408,17 @@ public class TransDataFrame extends JFrame {
 
         JButton testButton = new JButton("测试源接口");
         testButton.addActionListener(event -> runTest());
+        autoGenerateButton.setEnabled(false);
+        autoGenerateButton.addActionListener(event -> autoGenerateFromTest());
+
+        JPanel actionPanel = new JPanel(new GridLayout(3, 1, 4, 4));
+        actionPanel.add(testButton);
+        actionPanel.add(autoGenerateButton);
+        actionPanel.add(uniqueConstraintCheck);
 
         JPanel topPanel = new JPanel(new BorderLayout());
         topPanel.add(infoPanel, BorderLayout.CENTER);
-        topPanel.add(testButton, BorderLayout.EAST);
+        topPanel.add(actionPanel, BorderLayout.EAST);
 
         testResponseArea.setEditable(false);
         testResponseArea.setLineWrap(false);
@@ -526,6 +561,8 @@ public class TransDataFrame extends JFrame {
 
     private void setSelectedTask(TaskDefinition task) {
         selectedTask = task;
+        lastTestRecords = List.of();
+        autoGenerateButton.setEnabled(false);
         updateFieldsFromSelected();
         updateLogsTab();
     }
@@ -554,6 +591,8 @@ public class TransDataFrame extends JFrame {
                 scopeKeyField.setText("");
                 naturalKeyField.setText("");
                 distinctKeyField.setText("");
+                mappingPreviewArea.setText("");
+                previewSqlArea.setText("");
                 return;
             }
             taskIdField.setText(selectedTask.getTaskId());
@@ -580,6 +619,8 @@ public class TransDataFrame extends JFrame {
             scopeKeyField.setText(String.join(",", target.getAuditSettings().getScopeKeyFields()));
             naturalKeyField.setText(String.join(",", target.getAuditSettings().getNaturalKeyFields()));
             distinctKeyField.setText(target.getAuditSettings().getDistinctKeyJsonField());
+            mappingPreviewArea.setText("");
+            previewSqlArea.setText("");
         } finally {
             updatingFields = false;
         }
@@ -590,7 +631,20 @@ public class TransDataFrame extends JFrame {
             return;
         }
         selectedTask.setTaskName(taskNameField.getText().trim());
-        selectedTask.setEnabled(enabledCheck.isSelected());
+        boolean enableRequested = enabledCheck.isSelected();
+        String insertTemplateText = insertTemplateArea.getText();
+        if (enableRequested && (insertTemplateText == null || insertTemplateText.isBlank())) {
+            JOptionPane.showMessageDialog(this, "插入模板不能为空，任务无法启用。请先生成或填写插入模板。",
+                    "校验提示", JOptionPane.WARNING_MESSAGE);
+            updatingFields = true;
+            try {
+                enabledCheck.setSelected(false);
+            } finally {
+                updatingFields = false;
+            }
+            enableRequested = false;
+        }
+        selectedTask.setEnabled(enableRequested);
         selectedTask.setSourcePostUrl(sourceUrlField.getText().trim());
         selectedTask.setSourcePostBody(sourceBodyArea.getText());
         selectedTask.setBatchSize((Integer) batchSizeSpinner.getValue());
@@ -607,7 +661,7 @@ public class TransDataFrame extends JFrame {
         target.setTargetTable(targetTableField.getText().trim());
         target.setCreateTableSql(createTableArea.getText());
         target.setInsertMode((InsertMode) insertModeCombo.getSelectedItem());
-        target.setInsertTemplate(insertTemplateArea.getText());
+        target.setInsertTemplate(insertTemplateText);
         target.setConflictTarget(conflictTargetField.getText().trim());
         target.getAuditSettings().setScopeKeyFields(splitFields(scopeKeyField.getText()));
         target.getAuditSettings().setNaturalKeyFields(splitFields(naturalKeyField.getText()));
@@ -615,6 +669,10 @@ public class TransDataFrame extends JFrame {
 
         saveTasks();
         taskList.repaint();
+        if (target.getInsertMode() == InsertMode.SKIP_DUPLICATES
+                && (target.getConflictTarget() == null || target.getConflictTarget().isBlank())) {
+            ensureLogPanel(selectedTask).log("WARN", "SKIP_DUPLICATES 未配置冲突目标或唯一约束，可能导致运行时冲突处理无效。");
+        }
         TaskScheduler scheduler = ensureScheduler(selectedTask);
         if (selectedTask.isEnabled()) {
             scheduler.reschedule();
@@ -695,6 +753,8 @@ public class TransDataFrame extends JFrame {
         testElapsedField.setText("");
         testSizeField.setText("");
         testResponseArea.setText("");
+        autoGenerateButton.setEnabled(false);
+        lastTestRecords = List.of();
         backgroundExecutor.submit(() -> {
             try {
                 Timeout connectTimeout = Timeout.ofSeconds(10);
@@ -703,17 +763,73 @@ public class TransDataFrame extends JFrame {
                 try (CloseableHttpClient client = factory.createClient()) {
                     SourceClient sourceClient = new SourceClient(client, connectTimeout, responseTimeout);
                     SourceFetchResult result = sourceClient.testPost(selectedTask, config);
+                    List<JsonNode> records = List.of();
+                    boolean parsed = false;
+                    try {
+                        JsonNode root = objectMapper.readTree(result.getRawJson());
+                        records = JsonRecordLocator.locateRecords(root);
+                        parsed = true;
+                    } catch (Exception ignored) {
+                        // keep unparsed
+                    }
+                    List<JsonNode> finalRecords = records;
+                    boolean finalParsed = parsed;
                     SwingUtilities.invokeLater(() -> {
                         testStatusField.setText(String.valueOf(result.getStatusCode()));
                         testElapsedField.setText(result.getElapsedMillis() + " ms");
                         testSizeField.setText(result.getResponseBytes() + " bytes");
                         testResponseArea.setText(result.getPrettyJson());
+                        lastTestRecords = finalRecords;
+                        autoGenerateButton.setEnabled(finalParsed);
+                        if (!finalParsed) {
+                            logPanel.log("WARN", "响应非标准 JSON，无法自动生成 DDL 与插入模板。");
+                        } else if (finalRecords.isEmpty()) {
+                            logPanel.log("WARN", "样本记录为空，将生成最小安全表结构与模板。");
+                        }
                     });
                 }
             } catch (Exception ex) {
                 logPanel.log("ERROR", "测试失败：" + ex.getMessage());
                 SwingUtilities.invokeLater(() -> testStatusField.setText("失败"));
             }
+        });
+    }
+
+    private void autoGenerateFromTest() {
+        if (selectedTask == null) {
+            return;
+        }
+        UiLogPanel logPanel = ensureLogPanel(selectedTask);
+        if (lastTestRecords == null) {
+            JOptionPane.showMessageDialog(this, "暂无可用的测试样本，请先测试源接口。", "提示",
+                    JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        boolean suggestUnique = uniqueConstraintCheck.isSelected();
+        backgroundExecutor.submit(() -> {
+            AutoSqlGenerator generator = new AutoSqlGenerator();
+            AutoSqlGenerator.AutoSqlResult result = generator.generate(selectedTask, lastTestRecords, suggestUnique);
+            SwingUtilities.invokeLater(() -> {
+                updatingFields = true;
+                try {
+                    targetSchemaField.setText(result.targetSchema());
+                    targetTableField.setText(result.targetTable());
+                    createTableArea.setText(result.createTableSql());
+                    insertTemplateArea.setText(result.insertTemplate());
+                    mappingPreviewArea.setText(result.mappingPreview());
+                    previewSqlArea.setText(result.previewSql());
+                } finally {
+                    updatingFields = false;
+                }
+                applyChanges();
+                if (!result.warnings().isEmpty()) {
+                    for (String warning : result.warnings()) {
+                        logPanel.log("WARN", warning);
+                    }
+                } else {
+                    logPanel.log("INFO", "已生成建表 SQL 与插入模板，可在保存前调整。");
+                }
+            });
         });
     }
 
