@@ -767,7 +767,7 @@ public class TransDataFrame extends JFrame {
                     boolean parsed = false;
                     try {
                         JsonNode root = objectMapper.readTree(result.getRawJson());
-                        records = JsonRecordLocator.locateRecords(root);
+                        records = extractRecordsFromTestResponse(root);
                         parsed = true;
                     } catch (Exception ignored) {
                         // keep unparsed
@@ -784,7 +784,7 @@ public class TransDataFrame extends JFrame {
                         if (!finalParsed) {
                             logPanel.log("WARN", "响应非标准 JSON，无法自动生成 DDL 与插入模板。");
                         } else if (finalRecords.isEmpty()) {
-                            logPanel.log("WARN", "样本记录为空，将生成最小安全表结构与模板。");
+                            logPanel.log("WARN", "No data array records detected; generated generic payload structure; please edit manually.");
                         }
                     });
                 }
@@ -831,6 +831,27 @@ public class TransDataFrame extends JFrame {
                 }
             });
         });
+    }
+
+    private List<JsonNode> extractRecordsFromTestResponse(JsonNode root) {
+        if (root == null || root.isNull() || !root.isObject()) {
+            return List.of();
+        }
+        JsonNode data = root.get("data");
+        if (data == null || !data.isArray() || data.isEmpty()) {
+            return List.of();
+        }
+        JsonNode first = data.get(0);
+        if (first == null || first.isNull() || !first.isObject()) {
+            return List.of();
+        }
+        List<JsonNode> records = new ArrayList<>();
+        for (JsonNode item : data) {
+            if (item != null && item.isObject()) {
+                records.add(item);
+            }
+        }
+        return records;
     }
 
     private TaskScheduler ensureScheduler(TaskDefinition task) {

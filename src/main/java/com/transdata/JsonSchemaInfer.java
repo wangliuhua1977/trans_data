@@ -15,15 +15,22 @@ public class JsonSchemaInfer {
             "user", "order", "select", "where", "group", "table", "from", "to", "by",
             "insert", "update", "delete", "limit", "offset", "timestamp"
     );
+    private static final int SAMPLE_LIMIT = 100;
 
     public List<FieldSpec> infer(List<JsonNode> records) {
         Map<String, TypeStats> statsMap = new HashMap<>();
-        int total = records == null ? 0 : records.size();
+        int total = 0;
         if (records != null) {
+            int sampled = 0;
             for (JsonNode record : records) {
+                if (sampled >= SAMPLE_LIMIT) {
+                    break;
+                }
                 if (record == null || record.isNull() || !record.isObject()) {
                     continue;
                 }
+                sampled++;
+                total++;
                 for (var it = record.fields(); it.hasNext(); ) {
                     var entry = it.next();
                     String key = entry.getKey();
